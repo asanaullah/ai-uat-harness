@@ -12,6 +12,7 @@ A declarative test harness that generates Kubernetes manifests from test definit
     - [Placement (Cluster Scope)](#placement-cluster-scope)
   - [PVC Directory Hierarchy](#pvc-directory-hierarchy)
 - [Cluster Setup](#cluster-setup)
+  - [Clusters managed by oac-apps](#clusters-managed-by-oac-apps)
 - [Quickstart](#quickstart)
   - [Prerequisites](#prerequisites)
   - [Install](#install)
@@ -202,6 +203,7 @@ The `setup/` directory contains Kubernetes manifests and scripts for one-time cl
 - **`model-downloader.yaml`** — one-shot pods (one per namespace) that download HuggingFace models to the models PVC. Add models to the `MODELS` list and re-run.
 - **`allow-intra-namespace.yaml`** — NetworkPolicies for the `uat-project`, `uat-peer`, and `uat-admin` namespaces that permit same-namespace pod-to-pod traffic plus external egress (with cluster pod/service CIDRs excepted). Needed because the cluster's BaselineAdminNetworkPolicy denies tenant traffic by default — including same-namespace east-west — so builds and pod-to-service communication would otherwise fail.
 - **`prewarm-images.sh`** — a script that pre-pulls ("warms") every container image used by the test library onto each GPU node in a cluster config, so real test runs don't stall or time out on first-time image pulls. Launches a throwaway pod per (node × image), waits for the pulls to cache, then deletes the pods. Run with `setup/prewarm-images.sh cluster/ocp-test.yaml`.
+- **`auto_runner.yaml`** — the `uat-runner` pod, which clones this repo, runs the build, and drives the whole suite unattended as the `uat-runner-sa` ServiceAccount. Its configuration is the `env` block: `REPO_URL`, `BUILD_CMD`, and an optional `REPO_BRANCH`. Set `REPO_BRANCH` to a branch or tag to run that instead of the default branch, so a change can be tested from a pushed branch before it is merged; leave it empty otherwise.
 
 Apply in order:
 
@@ -215,6 +217,27 @@ oc logs -f model-downloader -n uat-project
 oc logs -f model-downloader -n uat-peer
 # optionally pre-pull test images onto the GPU nodes:
 setup/prewarm-images.sh cluster/ocp-test.yaml
+```
+
+### Clusters managed by oac-apps
+
+On an Open Accelerator cluster where [oac-apps](https://github.com/CCI-MOC/oac-apps) deploys the `uat-harness` chart (currently `oac-dev-workload0`), do not apply `namespaces-and-pvcs.yaml`, `uat-models-pvc.yaml`, or `allow-intra-namespace.yaml`. The chart creates the same resources through ArgoCD, and ArgoCD reverts anything changed by hand. What the chart provides:
+
+- The `uat-project`, `uat-peer`, and `uat-runner` namespaces, with their NetworkPolicies, Roles, RoleBindings, and the `uat-runner-sa` ServiceAccount.
+- The PVCs, under the same names the cluster configs use. Sizes are set in `charts/uat-harness/values.yaml` in oac-apps and differ from the files here; to change one, open a pull request there. A PVC can be grown but not shrunk.
+- Access for members of the `project-uat` Keycloak group instead of an individual user. Ask to be added to the group to run tests.
+
+The `uat-admin` namespace and the cluster-scoped RBAC for the admin platform checks are not part of the chart.
+
+Setup on such a cluster is then only the run-time pieces:
+
+```bash
+oc apply -f setup/model-downloader.yaml
+# wait for downloads to complete:
+oc logs -f model-downloader -n uat-project
+oc logs -f model-downloader -n uat-peer
+# optionally pre-pull test images onto the GPU nodes:
+setup/prewarm-images.sh cluster/oac-dev-workload0.yaml
 ```
 
 ## Quickstart
@@ -873,6 +896,7 @@ setup/
   model-downloader.yaml       Pods to download models to PVCs
   allow-intra-namespace.yaml  NetworkPolicies enabling same-namespace pod-to-pod traffic
   prewarm-images.sh           Pre-pulls test-library images onto each GPU node
+  auto_runner.yaml            Pod that runs a suite unattended (the uat-runner)
 templates/
   *.yaml.j2           Jinja2 templates for Kubernetes manifests
   resource.yaml.j2    Generic template for arbitrary K8s resources (resource steps)

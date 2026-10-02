@@ -8,6 +8,8 @@ set -euo pipefail
 
 : "${REPO_URL:?REPO_URL is required}"
 : "${BUILD_CMD:?BUILD_CMD is required}"
+# Optional branch (or tag) to run; empty means the repo's default branch.
+REPO_BRANCH="${REPO_BRANCH:-}"
 UAT_WORKSPACE="${UAT_WORKSPACE:-/uat_workspace}"
 UAT_BIN="${UAT_BIN:-/uat_bin}"
 
@@ -33,10 +35,11 @@ exec > >(stdbuf -oL -eL tee -a "${RUN_DIR}/runner.log") 2>&1
 echo "=== uat-runner ${RUN_ID} ==="
 echo "repo=${REPO_URL}"
 
-git clone "${REPO_URL}" "${REPO_DIR}"
+git clone ${REPO_BRANCH:+--branch "${REPO_BRANCH}"} "${REPO_URL}" "${REPO_DIR}"
 cd "${REPO_DIR}"
 SHA="$(git rev-parse HEAD)"
-echo "resolved commit=${SHA}"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+echo "resolved branch=${BRANCH} commit=${SHA}"
 
 # Provenance: copy the exact oc binary used for this run alongside its version,
 # so a run's artifacts fully describe how it was executed.
@@ -63,7 +66,8 @@ cat > "${META_DIR}/meta.json" <<EOF
 {
   "run_id": "${RUN_ID}",
   "build_run_id": "${BUILD_RUN_ID}",
-  "repo_url": "${REPO_URL}"
+  "repo_url": "${REPO_URL}",
+  "branch": "${BRANCH}",
   "commit": "${SHA}",
   "build_cmd": "${BUILD_CMD}",
   "oc_binary": "meta/oc",
