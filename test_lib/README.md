@@ -220,7 +220,7 @@ The `uat-sa` ServiceAccount must exist in the `uat-admin` namespace with a Clust
 | `get`, `list` | `nodes` | GPU node label checks |
 | `list` | `pods` (in operator namespaces) | Required pod checks |
 
-This SA and ClusterRole are created by `setup/namespaces-and-pvcs.yaml`. The test must be run with the `cluster/ocp-test-admin.yaml` cluster config, which targets the `uat-admin` namespace.
+This SA and ClusterRole are created by `setup/admin-namespace-and-pvcs.yaml`. The test must be run with the `cluster/ocp-test-admin.yaml` cluster config, which targets the `uat-admin` namespace.
 
 ### Design rationale
 

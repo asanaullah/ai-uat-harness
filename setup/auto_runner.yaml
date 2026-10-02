@@ -1,7 +1,7 @@
 # Assisted by Claude Opus
 # uat-runner: clones the repo, runs the build, and drives the generated steps
 # step-by-step against the test namespaces. Requires the uat-runner namespace,
-# uat-runner-sa, and uat-runner-storage PVC from namespaces-and-pvcs.yaml.
+# uat-runner-sa, and uat-runner-storage PVC from user-namespaces-and-pvcs.yaml.
 #
 # The pod is a thin bootstrap: it shallow-clones the repo to get the entrypoint
 # (scripts/auto_runner_setup.sh), then hands off. All run logic is versioned in
