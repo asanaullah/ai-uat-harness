@@ -198,19 +198,18 @@ DAG pods also get a second mount at `/binaries` for access to compiled test bina
 
 The `setup/` directory contains Kubernetes manifests and scripts for one-time cluster preparation:
 
-- **`namespaces-and-pvcs.yaml`** — creates the `uat-project`, `uat-peer`, and `uat-admin` namespaces (each labeled `massopen.cloud/project`), a 100Gi RWX PVC for test results in each namespace (`uat-project-storage`, `uat-peer-storage`, `uat-admin-storage`), and RBAC. The `uat-project` and `uat-peer` namespaces get a namespace-scoped Role + RoleBinding granting the test user access to pods, services, configmaps, and (in `uat-project`) workload APIs (jobs, jobsets, kubeflow, kserve, ray). The `uat-admin` namespace additionally defines a `uat-sa` ServiceAccount, a namespace-scoped admin Role, and a **ClusterRole + ClusterRoleBinding** granting read access to cluster-scoped resources (nodes, deployments, DataScienceClusters, ClusterPolicies, NodeFeatureDiscoveries, ServiceMeshControlPlanes) used by the admin platform checks.
-- **`uat-models-pvc.yaml`** — creates a 500Gi RWX PVC (`uat-models`) for pre-downloaded model weights in the `uat-project` and `uat-peer` namespaces.
+- **`user-namespaces-and-pvcs.yaml`** — creates the `uat-project`, `uat-peer`, and `uat-runner` namespaces (each labeled `massopen.cloud/project`), their PVCs, and RBAC. `uat-project` and `uat-peer` each get a 50Gi RWX PVC for test results (`uat-project-storage`, `uat-peer-storage`) and a 100Gi RWX PVC (`uat-models`) for pre-downloaded model weights, plus a namespace-scoped Role + RoleBinding granting the test user access to pods, services, configmaps, and (in `uat-project`) workload APIs (jobs, jobsets, kubeflow, kserve, ray). `uat-runner` gets the runner's workspace and binary PVCs (`uat-runner-storage` 100Gi, `uat-runner-bin` 10Gi) and the `uat-runner-sa` ServiceAccount, which is bound to the test-user Role in the other two namespaces. `uat-project` and `uat-peer` also get a NetworkPolicy that permits same-namespace pod-to-pod traffic plus external egress. It is needed because the cluster's BaselineAdminNetworkPolicy denies tenant traffic by default — including same-namespace east-west — so builds and pod-to-service communication would otherwise fail.
+- **`admin-namespace-and-pvcs.yaml`** — everything for the admin platform checks, kept separate because it needs cluster-admin to apply: the `uat-admin` namespace, a 50Gi RWX PVC for test results (`uat-admin-storage`), a `uat-sa` ServiceAccount, a namespace-scoped admin Role, the same NetworkPolicy the test namespaces get, and a **ClusterRole + ClusterRoleBinding** granting read access to cluster-scoped resources (nodes, deployments, DataScienceClusters, ClusterPolicies, NodeFeatureDiscoveries, ServiceMeshControlPlanes).
 - **`model-downloader.yaml`** — one-shot pods (one per namespace) that download HuggingFace models to the models PVC. Add models to the `MODELS` list and re-run.
-- **`allow-intra-namespace.yaml`** — NetworkPolicies for the `uat-project`, `uat-peer`, and `uat-admin` namespaces that permit same-namespace pod-to-pod traffic plus external egress (with cluster pod/service CIDRs excepted). Needed because the cluster's BaselineAdminNetworkPolicy denies tenant traffic by default — including same-namespace east-west — so builds and pod-to-service communication would otherwise fail.
 - **`prewarm-images.sh`** — a script that pre-pulls ("warms") every container image used by the test library onto each GPU node in a cluster config, so real test runs don't stall or time out on first-time image pulls. Launches a throwaway pod per (node × image), waits for the pulls to cache, then deletes the pods. Run with `setup/prewarm-images.sh cluster/ocp-test.yaml`.
 - **`auto_runner.yaml`** — the `uat-runner` pod, which clones this repo, runs the build, and drives the whole suite unattended as the `uat-runner-sa` ServiceAccount. Its configuration is the `env` block: `REPO_URL`, `BUILD_CMD`, and an optional `REPO_BRANCH`. Set `REPO_BRANCH` to a branch or tag to run that instead of the default branch, so a change can be tested from a pushed branch before it is merged; leave it empty otherwise.
 
 Apply in order:
 
 ```bash
-oc apply -f setup/namespaces-and-pvcs.yaml
-oc apply -f setup/allow-intra-namespace.yaml
-oc apply -f setup/uat-models-pvc.yaml
+oc apply -f setup/user-namespaces-and-pvcs.yaml
+# only for the admin platform checks (needs cluster-admin):
+oc apply -f setup/admin-namespace-and-pvcs.yaml
 oc apply -f setup/model-downloader.yaml
 # wait for downloads to complete:
 oc logs -f model-downloader -n uat-project
@@ -221,10 +220,10 @@ setup/prewarm-images.sh cluster/ocp-test.yaml
 
 ### Clusters managed by oac-apps
 
-On an Open Accelerator cluster where [oac-apps](https://github.com/CCI-MOC/oac-apps) deploys the `uat-harness` chart (currently `oac-dev-workload0`), do not apply `namespaces-and-pvcs.yaml`, `uat-models-pvc.yaml`, or `allow-intra-namespace.yaml`. The chart creates the same resources through ArgoCD, and ArgoCD reverts anything changed by hand. What the chart provides:
+On an Open Accelerator cluster where [oac-apps](https://github.com/CCI-MOC/oac-apps) deploys the `uat-harness` chart (currently `oac-dev-workload0`), do not apply `user-namespaces-and-pvcs.yaml`. The chart creates the same resources through ArgoCD, and ArgoCD reverts anything changed by hand. What the chart provides:
 
 - The `uat-project`, `uat-peer`, and `uat-runner` namespaces, with their NetworkPolicies, Roles, RoleBindings, and the `uat-runner-sa` ServiceAccount.
-- The PVCs, under the same names the cluster configs use. Sizes are set in `charts/uat-harness/values.yaml` in oac-apps and differ from the files here; to change one, open a pull request there. A PVC can be grown but not shrunk.
+- The PVCs, under the same names the cluster configs use. Sizes are set in `charts/uat-harness/values.yaml` in oac-apps; to change one, open a pull request there. A PVC can be grown but not shrunk.
 - Access for members of the `project-uat` Keycloak group instead of an individual user. Ask to be added to the group to run tests.
 
 The `uat-admin` namespace and the cluster-scoped RBAC for the admin platform checks are not part of the chart.
@@ -891,12 +890,11 @@ scripts/
   manual_runner.py    Curses dashboard for running a suite interactively from build/
   auto_runner.py      Headless driver that runs a suite unattended from build/
 setup/
-  namespaces-and-pvcs.yaml    Namespaces (uat-project, uat-peer, uat-admin), PVCs, and RBAC
-  uat-models-pvc.yaml         PVC for model storage
-  model-downloader.yaml       Pods to download models to PVCs
-  allow-intra-namespace.yaml  NetworkPolicies enabling same-namespace pod-to-pod traffic
-  prewarm-images.sh           Pre-pulls test-library images onto each GPU node
-  auto_runner.yaml            Pod that runs a suite unattended (the uat-runner)
+  user-namespaces-and-pvcs.yaml   Namespaces (uat-project, uat-peer, uat-runner), PVCs, RBAC, and NetworkPolicies
+  admin-namespace-and-pvcs.yaml   Admin namespace (uat-admin), PVC, NetworkPolicy, and cluster-scoped RBAC
+  model-downloader.yaml           Pods to download models to PVCs
+  prewarm-images.sh               Pre-pulls test-library images onto each GPU node
+  auto_runner.yaml                Pod that runs a suite unattended (the uat-runner)
 templates/
   *.yaml.j2           Jinja2 templates for Kubernetes manifests
   resource.yaml.j2    Generic template for arbitrary K8s resources (resource steps)
