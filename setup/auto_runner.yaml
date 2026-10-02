@@ -42,11 +42,16 @@ spec:
         - |
           set -euo pipefail
           boot="$(mktemp -d)"
-          git clone --depth 1 "${REPO_URL}" "${boot}"
+          git clone --depth 1 ${REPO_BRANCH:+--branch "${REPO_BRANCH}"} "${REPO_URL}" "${boot}"
           exec bash "${boot}/scripts/auto_runner_setup.sh"
       env:
         - name: REPO_URL
           value: "https://github.com/asanaullah/ai-uat-harness.git"
+        # Optional branch (or tag) to run instead of the repo's default branch,
+        # for testing changes before they are merged. Leave empty for the
+        # default branch.
+        - name: REPO_BRANCH
+          value: ""
         # Build command producing build/steps.json + build/manual/*.sh. Runs
         # from the cloned repo root. Keep the suite/cluster non-admin.
         - name: BUILD_CMD
