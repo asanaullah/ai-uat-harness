@@ -67,7 +67,7 @@ cd "$(dirname "$(realpath "$0")")"
 
 runs_dir="${UAT_RUNS_DIR:-$PWD/runs}"
 if [ -n "$fetch" ]; then
-  exec ansible-playbook -i "$cluster" -e "uat_run_id=$fetch" -e "uat_runs_dir=$runs_dir" plugins/playbooks/fetch.yml "${args[@]}"
+  exec ansible-playbook -i "$cluster" -e "uat_run_id=$fetch" -e "uat_runs_dir=$runs_dir" plugins/playbooks/fetch.yml ${args[@]+"${args[@]}"}
 fi
 
 run_id="${run_id:-$(date -u +%Y%m%d_%H%M%S)}"
@@ -94,12 +94,16 @@ for t in ${tests//,/ }; do
 done
 [ ${#playbooks[@]} -gt 0 ] || { echo "nothing to run: give -b and/or -t" >&2; exit 2; }
 
+# Relative to the repository root, which is the working directory here (GNU
+# realpath --relative-to is not on macOS).
+relpath() { python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1]))' "$1"; }
+
 if $in_pod; then
   for f in "$cluster" ${batch:+"$batch"}; do
     case "$f" in "$PWD"/*) ;; *) echo "with -p, $f must be inside this repository" >&2; exit 2 ;; esac
   done
-  pod_args=(-c "$(realpath --relative-to=. "$cluster")" -r "$run_id")
-  [ -n "$batch" ] && pod_args+=(-b "$(realpath --relative-to=. "$batch")")
+  pod_args=(-c "$(relpath "$cluster")" -r "$run_id")
+  [ -n "$batch" ] && pod_args+=(-b "$(relpath "$batch")")
   [ -n "$tests" ] && pod_args+=(-t "$tests")
   [ -n "$mode" ] && pod_args+=(-m "$mode")
   [ -n "$policy" ] && pod_args+=(-f "$policy")
@@ -114,9 +118,9 @@ v.update({"uat_runner_args": shlex.join(sys.argv[5:]), "uat_runner_repo": repo,
 json.dump(v, open(path, "w"), indent=2)
 PY
   export ANSIBLE_LOG_PATH="$run_dir/runner-ansible.log"
-  exec ansible-playbook -i "$cluster" -e "@$vars" plugins/playbooks/runner.yml "${args[@]}"
+  exec ansible-playbook -i "$cluster" -e "@$vars" plugins/playbooks/runner.yml ${args[@]+"${args[@]}"}
 fi
 
 export ANSIBLE_LOG_PATH="$run_dir/ansible.log"
 exec ansible-playbook -i "$cluster" -e "@$vars" \
-  plugins/playbooks/start.yml "${playbooks[@]}" plugins/playbooks/finish.yml "${args[@]}"
+  plugins/playbooks/start.yml "${playbooks[@]}" plugins/playbooks/finish.yml ${args[@]+"${args[@]}"}
