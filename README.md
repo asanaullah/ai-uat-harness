@@ -18,6 +18,7 @@ Acceptance tests for AI platforms on OpenShift, written as Ansible playbooks. Ea
 
 - `ansible-core` 2.16 or newer (tested with 2.18) and the Python `kubernetes` library for the Python that Ansible runs on (Fedora and RHEL: `python3-kubernetes`; pip: `kubernetes`).
 - A login to the cluster (`oc login`), or a pod service account when running in the cluster.
+- For a run from this machine (without `-p`), Linux: the run reads `/proc` and unpacks the results with GNU tar. From macOS, run with `-p`, which runs the harness in a pod on the cluster.
 - In the test namespaces: create, get, list, watch and delete on pods, `pods/log` and services; create and get on `pods/exec`; list on events; and the APIs the tests use (KubeVirt VMs, InferenceServices, Kubeflow TrainJobs), with get on the objects those make (VMIs, JobSets, batch Jobs) so the log streamer can find their pods. The `uat-harness` chart in oac-apps grants these, and on clusters that oac-apps does not manage, `setup/namespaces.yml` does.
 
 ## Quick start
