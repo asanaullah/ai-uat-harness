@@ -1,0 +1,215 @@
+# Assisted by Claude Opus
+- name: Plan vm-migration
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: vm-migration
+    uat_modes: [project]
+
+- name: vm-migration
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  vars:
+    serverConfig:
+      vmImage: quay.io/containerdisks/fedora:41
+    readerSecretName: "uat-{{ uat_tid }}-{{ uat_seq.qid }}-reader-token"
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        # The check acts as the identity these playbooks run under, through a
+        # Secret torn down with the sequence.
+        - name: Read the in-pod service account token
+          ansible.builtin.set_fact:
+            reader_token: "{{ lookup('ansible.builtin.file', '/var/run/secrets/kubernetes.io/serviceaccount/token', errors='ignore') | trim }}"
+          when: not uat_dry_run | bool
+
+        - name: Read the token from the kubeconfig
+          ansible.builtin.set_fact:
+            reader_token: "{{ (_kube.users | selectattr('user.token', 'defined') | map(attribute='user.token') | first | default('')) | trim }}"
+          vars:
+            kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') ~ '/.kube/config', true)
+                            | replace('~', lookup('env', 'HOME')) | split(':') | first }}"
+            _kube: "{{ (lookup('ansible.builtin.file', kubeconfig, errors='ignore') | default('', true) | from_yaml) or {} }}"
+          when: not uat_dry_run | bool and (reader_token | default('')) | length == 0
+
+        - name: Stop without a token to migrate the VM with
+          ansible.builtin.fail:
+            msg: >-
+              No token found to migrate the VM with. Run from the runner pod (-p),
+              or from a machine logged in with oc login as a member of the project group.
+          when: not uat_dry_run | bool and (reader_token | default('')) | length == 0
+
+        - name: Give the check the reader's token
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: "{{ readerSecretName }}"
+                namespace: "{{ uat_namespace }}"
+                labels: "{{ uat_seq_labels | combine({'app.kubernetes.io/managed-by': uat_managed_by}) }}"
+              type: Opaque
+              stringData:
+                token: "{{ reader_token }}"
+          when: not uat_dry_run | bool
+
+        - name: Tear the reader token down with the sequence
+          ansible.builtin.set_fact:
+            uat_seq_objects: "{{ uat_seq_objects + [{'api_version': 'v1', 'kind': 'Secret', 'namespace': uat_namespace}] }}"
+          when: not uat_dry_run | bool
+
+        # Migration needs the disk reachable from both nodes, so ReadWriteMany.
+        - name: dv
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: dv
+              resourceConfig:
+                apiVersion: cdi.kubevirt.io/v1beta1
+                kind: DataVolume
+                spec:
+                  source:
+                    registry:
+                      url: "docker://{{ serverConfig.vmImage }}"
+                      pullMethod: node
+                  storage:
+                    accessModes: [ReadWriteMany]
+                    resources:
+                      requests:
+                        storage: 10Gi
+
+        - name: vm
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: vm
+              resourceConfig:
+                apiVersion: kubevirt.io/v1
+                kind: VirtualMachine
+                spec:
+                  runStrategy: Always
+                  template:
+                    metadata:
+                      labels:
+                        app: vm-migration
+                        uat/run: "{{ uat_run_id }}"
+                    spec:
+                      tolerations:
+                        - key: nvidia.com/gpu.product
+                          operator: Exists
+                          effect: NoSchedule
+                      terminationGracePeriodSeconds: 0
+                      domain:
+                        cpu:
+                          cores: 2
+                        memory:
+                          guest: 2Gi
+                        resources:
+                          requests: {cpu: 2, memory: 2Gi}
+                          limits: {cpu: 2, memory: 2Gi}
+                        devices:
+                          rng: {}
+                          disks:
+                            - name: rootdisk
+                              disk: {bus: virtio}
+                            - name: cloudinit
+                              disk: {bus: virtio}
+                          interfaces:
+                            - name: default
+                              model: virtio
+                              masquerade: {}
+                      networks:
+                        - name: default
+                          pod: {}
+                      volumes:
+                        - name: rootdisk
+                          dataVolume:
+                            name: '{{ resources["dv"].name }}'
+                        - name: cloudinit
+                          cloudInitNoCloud:
+                            userData: |
+                              #cloud-config
+                              write_files:
+                                - path: /usr/local/bin/guest-web.sh
+                                  permissions: '0755'
+                                  content: |
+                                    #!/bin/bash
+                                    mkdir -p /srv/guest
+                                    [ -f /srv/guest/marker ] || printf '%s from %s\n' '{{ uat_run_id }}' 'vm-migration' > /srv/guest/marker
+                                    cat /proc/sys/kernel/random/boot_id > /srv/guest/boot-id
+                                    ( while true; do date +%s%N > /srv/guest/heartbeat; sleep 0.1; done ) &
+                                    cd /srv/guest
+                                    exec python3 -m http.server 8080
+                                - path: /etc/systemd/system/guest-web.service
+                                  content: |
+                                    [Unit]
+                                    Description=guest web server
+                                    After=network-online.target
+                                    [Service]
+                                    ExecStart=/usr/local/bin/guest-web.sh
+                                    Restart=on-failure
+                                    [Install]
+                                    WantedBy=multi-user.target
+                              runcmd:
+                                - [systemctl, enable, --now, guest-web.service]
+
+        - name: vm-service
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: vm-service
+              resourceConfig:
+                apiVersion: v1
+                kind: Service
+                spec:
+                  clusterIP: None
+                  selector:
+                    app: vm-migration
+                    uat/run: "{{ uat_run_id }}"
+                  ports:
+                    - {port: 8080, targetPort: 8080}
+
+        - name: check
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: check
+              image: registry.redhat.io/ubi9/ubi:9.8
+              labelFilter: pass-fail
+              timeout: 1500
+              env:
+                - name: VM_URL
+                  value: 'http://{{ resources["vm-service"].name }}:8080'
+                - name: VM_NAME
+                  value: '{{ resources["vm"].name }}'
+                - name: RUN_ID
+                  value: '{{ uat_run_id }}'
+                - name: READER_TOKEN_FILE
+                  value: /var/run/secrets/uat-reader/token
+              volumes:
+                - name: reader-token
+                  secret:
+                    secretName: '{{ readerSecretName }}'
+              volumeMounts:
+                - name: reader-token
+                  mountPath: /var/run/secrets/uat-reader
+                  readOnly: true
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown

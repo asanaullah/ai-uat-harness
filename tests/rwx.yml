@@ -1,0 +1,67 @@
+# Assisted by Claude Opus
+- name: Plan rwx
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: rwx
+    uat_modes: [pairs]
+
+- name: rwx
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        # Each pairs sequence writes on its first node and reads back on its second.
+        - name: writer
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: writer
+              nodeIndex: 0
+              image: registry.redhat.io/ubi9/ubi:9.8
+              env:
+                - name: RUN_ID
+                  value: '{{ uat_run_id }}'
+                - name: WRITER_NODE
+                  value: '{{ node }}'
+              command:
+                args:
+                  - bash
+                  - -c
+                  - >-
+                    printf '%s from %s\n' "$RUN_ID" "$WRITER_NODE" > /uat_scratchpad/marker-"$WRITER_NODE"
+
+        - name: reader
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: reader
+              nodeIndex: 1
+              image: registry.redhat.io/ubi9/ubi:9.8
+              labelFilter: pass-fail
+              env:
+                - name: RUN_ID
+                  value: '{{ uat_run_id }}'
+                - name: WRITER_NODE
+                  value: '{{ uat_seq.nodes | first }}'
+                - name: NODE
+                  value: '{{ node }}'
+                - name: MARKER_DIR
+                  value: /uat_scratchpad
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown

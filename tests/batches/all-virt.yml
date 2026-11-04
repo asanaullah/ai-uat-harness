@@ -8,5 +8,23 @@
 - name: fio-virt
   ansible.builtin.import_playbook: ../fio-virt.yml
 
+- name: vm-network
+  ansible.builtin.import_playbook: ../vm-network.yml
+
+- name: vm-storage
+  ansible.builtin.import_playbook: ../vm-storage.yml
+
+- name: vm-migration
+  ansible.builtin.import_playbook: ../vm-migration.yml
+
+- name: vm-evictability
+  ansible.builtin.import_playbook: ../vm-evictability.yml
+
+- name: vm-secondary-ipam
+  ansible.builtin.import_playbook: ../vm-secondary-ipam.yml
+
+- name: vm-memory-overhead
+  ansible.builtin.import_playbook: ../vm-memory-overhead.yml
+
 - name: Finish
   ansible.builtin.import_playbook: ../../plugins/playbooks/finish.yml

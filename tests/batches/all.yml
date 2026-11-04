@@ -18,11 +18,20 @@
   vars:
     uat_mode: serial
 
+- name: rwx
+  ansible.builtin.import_playbook: ../rwx.yml
+
+- name: negative
+  ansible.builtin.import_playbook: ../negative.yml
+
 - name: dev-env
   ansible.builtin.import_playbook: ../dev-env.yml
 
 - name: kserve
   ansible.builtin.import_playbook: ../kserve.yml
+
+- name: inference-extended
+  ansible.builtin.import_playbook: ../inference-extended.yml
 
 - name: guidellm
   ansible.builtin.import_playbook: ../guidellm.yml
@@ -47,6 +56,9 @@
 
 - name: peer-load-low
   ansible.builtin.import_playbook: ../peer-load-low.yml
+
+- name: metrics-isolation
+  ansible.builtin.import_playbook: ../metrics-isolation.yml
 
 - name: Finish
   ansible.builtin.import_playbook: ../../plugins/playbooks/finish.yml

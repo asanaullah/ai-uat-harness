@@ -17,6 +17,14 @@ Platform prerequisites. Checks that must pass before GPU workloads run.
 | [iperf3-virt](#14-iperf3-virt) | TCP bandwidth between a pod and a KubeVirt VM on the same node |
 | [fio](#15-fio) | Storage throughput, IOPS and latency on the results PVC from a pod |
 | [fio-virt](#16-fio-virt) | Storage throughput, IOPS and latency on a PVC attached to a KubeVirt VM as a disk |
+| [rwx](#20-rwx) | Shared filesystem visibility across nodes on the RWX results claim |
+| [negative](#21-negative) | Failure modes: over-requests wait in Pending, deletions complete |
+| [vm-network](#22-vm-network) | Guest networking: reachability in and out of a KubeVirt VM |
+| [vm-storage](#24-vm-storage) | Guest persistence: a CDI root disk survives a full VM stop and start |
+| [vm-migration](#25-vm-migration) | Live migration: the VM moves nodes without rebooting |
+| [vm-evictability](#26-vm-evictability) | Eviction: a plain pod yields, a VM's pod is guarded |
+| [vm-secondary-ipam](#27-vm-secondary-ipam) | Secondary-network address exhaustion, legibility and release |
+| [vm-memory-overhead](#28-vm-memory-overhead) | What a VM's memory costs the node, measured at three guest sizes |
 
 ### Operator
 Model serving through cluster operators and CRDs.
@@ -24,6 +32,7 @@ Model serving through cluster operators and CRDs.
 | Test | Description |
 |------|-------------|
 | [kserve](#6-kserve) | KServe InferenceService deployment and inference validation |
+| [inference-extended](#23-inference-extended) | Serving behavior: correctness, schema, determinism, streaming, errors, stop sequences |
 
 ### Fine-Tuning
 Model fine-tuning through a training operator, and serving the result.
@@ -60,6 +69,7 @@ Namespace isolation and cross-tenant performance impact. Isolation tests verify 
 | Test | Description |
 |------|-------------|
 | [ping](#11-ping) | Cross-namespace service connectivity |
+| [metrics-isolation](#19-metrics-isolation) | Cross-namespace metrics readability |
 | [peer-load-high](#12-peer-load-high) | Inference performance under high cross-namespace GPU load |
 | [peer-load-low](#13-peer-load-low) | Inference performance under low cross-namespace GPU load |
 
@@ -80,7 +90,15 @@ A vertical test detects that something is wrong but cannot say which layer is re
                |  platform-check-virt     |                            |
   Functional   |  component               |  kserve                    |
   (does it     |  ping                    |  finetune-lora             |
-   work?)      |                          |                            |
+   work?)      |  metrics-isolation       |  inference-extended        |
+               |  rwx                     |                            |
+               |  negative                |                            |
+               |  vm-network              |                            |
+               |  vm-storage              |                            |
+               |  vm-migration            |                            |
+               |  vm-evictability         |                            |
+               |  vm-secondary-ipam       |                            |
+               |  vm-memory-overhead      |                            |
                +--------------------------+----------------------------+
                |  iperf3                  |  guidellm                  |
   Performance  |  iperf3-virt             |  inference-perf            |
@@ -1035,3 +1053,524 @@ Same as `platform-check`: the default ServiceAccount is enough.
 ### Design rationale
 
 As in `platform-check`, the CRD checks show that the operators are installed but not that they are healthy. A VM test that fails to start is what shows an unhealthy operator.
+
+
+---
+
+## 19. metrics-isolation
+
+### Purpose
+
+This test validates that metrics are isolated between namespaces. Both namespaces publish a canary metric through a PodMonitor to user workload monitoring, from where Thanos Querier serves every namespace as one shared pile. Nothing in that pipeline separates projects: the separation sits at the two doors a project can use. The tenancy port (9092) checks the identity's right to read the requested namespace and pins the query to that namespace; the web port (9091) only cluster monitors may use. The test tries every way the project namespace has to read the peer's canary, and each must fail or come back without it.
+
+### Architecture
+
+```
+project-canary [persistent, project namespace]
+    +--- project-podmonitor [PodMonitor, project namespace]
+    |
+peer-canary [persistent, peer namespace]
+    +--- peer-podmonitor [PodMonitor, peer namespace]
+    |
+    |            user workload Prometheus (scrapes both, no separation)
+    |            Thanos Querier (serves both, no separation)
+    |
+    +--- peer-check [pass-fail, ephemeral, peer namespace]
+    |        own canary served at the source ✓
+    |        tenancy port, own namespace, own token ✗ 403
+    |
+    +--- project-check [pass-fail, ephemeral, project namespace]
+             own canary served at the source ✓
+             reader may read own namespace ✓, may not read the peer's ✓
+             tenancy port, own namespace, reader token: own canary ✓
+             tenancy port, own namespace, reader token: peer's canary ✗
+             tenancy port, peer namespace, reader token ✗ 403
+             web port, reader token ✗ 403
+             tenancy port, own namespace, own token ✗ 403
+```
+
+The reader is the identity the harness playbooks themselves run under: the runner service account with `-p`, the logged-in person without it. It holds the project's user role, which may read metrics there, and the peer's, which may not: a plain tenant, which is who the isolation must hold for. Its token is handed to the project check through a Secret that is torn down with the sequence.
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| project-canary | `registry.redhat.io/ubi9/ubi:9.8` | none | headless ClusterIP :8080 | serves `uat_canary_metric{run="<id>"} 1` on `/metrics` |
+| peer-canary | `registry.redhat.io/ubi9/ubi:9.8` | none | headless ClusterIP :8080 (peer namespace) | same canary, labeled for its PodMonitor |
+| project-podmonitor | PodMonitor | none | none | selects `uat/canary=project` |
+| peer-podmonitor | PodMonitor | none | none | selects `uat/canary=peer` (peer namespace) |
+| peer-check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `METRIC_NAME`, `RUN_ID`, `CANARY_URL`, `THANOS_TENANCY_URL` env |
+| project-check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | those plus `PEER_NAMESPACE`, `THANOS_WEB_URL`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+**peer-check:**
+
+1. Own canary serves the metric over HTTP (the canary exists at the source)
+2. Tenancy port refuses the peer's own namespace to a plain tenant pod: 403
+
+**project-check:**
+
+3. Own canary serves the metric over HTTP
+4. Reader may `get` `pods.metrics.k8s.io` in the project namespace (SelfSubjectAccessReview; the premise for reading through the tenancy port)
+5. Reader may not `get` `pods.metrics.k8s.io` in the peer namespace (the premise for every refusal below)
+6. Tenancy port returns the project's canary to the reader, polling until user workload monitoring has scraped it (the positive control every refusal is measured against)
+7. Tenancy port, queried with the project's namespace as a project's Grafana would, never returns the peer's canary: without a namespace matcher, with an explicit peer matcher, with a regex matcher, and aggregated with `sum`, which must count exactly one series
+8. Tenancy port refuses the peer's namespace to the reader: 403
+9. Web port refuses the reader: 403 (the unpinned pile is for cluster monitors)
+10. Tenancy port refuses a plain tenant pod even for its own namespace: 403 (the door checks rights, not just shape)
+
+### Prerequisites
+
+Both namespaces' roles may create PodMonitors (`uat-harness` chart), user workload monitoring is enabled on the cluster, and egress to `openshift-monitoring` is open as it is for every tenant namespace. The peer's canary being scraped is not directly observable from either namespace, since no identity available to the test may read the peer's metrics; the project-side positive control covers the scrape pipeline, and the peer's PodMonitor is created by the same mechanism.
+
+### Design rationale
+
+The canary metric carries the run id, so queries never match another run's leftovers. The source checks prove each canary exists before any refusal is trusted, and the reader premises (assertions 4 and 5) make the test fail loudly when it is run by an identity that is not a plain tenant, such as a cluster admin on a workstation, instead of reporting a vacuous pass. The query shapes in assertion 7 exist because the tenancy port's namespace pinning is the actual isolation mechanism; a pinning failure would return the peer's series to a fully authorized reader, which no amount of 403 checking would catch.
+
+
+---
+
+## 20. rwx
+
+### Purpose
+
+This test validates that the results claim's ReadWriteMany access is real across nodes. Two pods pinned to different nodes share the test's scratchpad directory: the writer writes a marker file, and the reader, on another node, reads it back and checks the content. A claim that only appears RWX, or a filesystem that is not actually shared, fails here.
+
+### Architecture
+
+```
+writer [pass-fail, ephemeral, first node of the pair]
+    writes marker-<node> to the scratchpad
+    |
+reader [pass-fail, ephemeral, second node of the pair]
+    reads marker-<writer node> back, checks content, checks it is on a different node
+```
+
+Pairs mode runs one sequence per ordered node pair, so on a two-node cluster each direction (A to B, then B to A) is checked.
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| writer | `registry.redhat.io/ubi9/ubi:9.8` | none | none | writes `/uat_scratchpad/marker-<node>` |
+| reader | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `RUN_ID`, `WRITER_NODE`, `NODE`, `MARKER_DIR` env |
+
+### Pass-fail assertions
+
+1. The reader's node differs from the writer's (the data really crossed nodes)
+2. The marker the writer left is readable and holds exactly `<run id> from <writer node>`
+
+### Prerequisites
+
+At least two nodes, since pairs mode places the writer and reader on different nodes. The scratchpad is a subdirectory of the same RWX claim the run results live on, created by the harness for every step.
+
+### Design rationale
+
+The scratchpad is used instead of a claim of the test's own because the project deliberately has no rights to create claims: the harness's pre-provisioned storage is the shared filesystem every step already mounts. fio measures how fast that filesystem is; this test checks that it is one filesystem.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `component-checks/rwx.sh`.
+
+---
+
+## 21. negative
+
+### Purpose
+
+This test validates the platform's failure modes. Two pods ask for more than any node has (one for twice the largest node's memory, one for one GPU more than the largest node's count, both derived from the cluster config's inventory so a request that is impossible on one cluster cannot become schedulable on a bigger one) and both must wait in `Pending` with `Unschedulable` as the reason, visible on the pod, instead of being silently queued or failing outright. Deleting them must then complete, rather than leaving them stuck in `Terminating`.
+
+### Architecture
+
+```
+memory-hog [Pending, never scheduled]
+gpu-hog [Pending, never scheduled]
+    |
+check [pass-fail, ephemeral]
+    reads both pods: phase Pending, PodScheduled False, reason Unschedulable
+    deletes both pods: they disappear
+```
+
+The GPU taint is tolerated on both pods, so the resource request itself is the only thing keeping them unscheduled.
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| memory-hog | `registry.redhat.io/ubi9/ubi:9.8` | none | none | requests 2× the largest node's memory |
+| gpu-hog | `registry.redhat.io/ubi9/ubi:9.8` | max+1 requested | none | requests one GPU more than the largest node's count |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `HOGS`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+For each of the two over-requesting pods:
+
+1. Phase is `Pending` (not `Running`, not `Failed`: the request was neither furtively satisfied nor rejected)
+2. The `PodScheduled` condition is `False` with reason `Unschedulable`, so the failure is legible on the object
+3. After deletion, the pod is gone within two minutes (deletion does not hang in `Terminating`)
+
+### Prerequisites
+
+None beyond pod rights. The check reads and deletes the pods as the reader identity (the one the playbooks run under), whose token reaches the check pod through a Secret torn down with the sequence.
+
+### Design rationale
+
+The hogs' requests are derived from the cluster config's node inventory (twice the largest `componentValidation.sanity.memory`, one more than the largest `nvidia.com/gpu` count) and the test fails loudly when a node's memory is not a plain `<number>Gi`, rather than deriving a request that might fit somewhere. Asserting the `Unschedulable` reason, not just the phase, is what makes this a failure-mode test rather than a scheduling one: a platform that hid the reason, or dropped the pod into a silent queue, would fail the second assertion. The check deletes the pods itself so that "deletion completes" is an assertion with a deadline, instead of something teardown does unobserved.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `component-checks/negative-tests.sh`.
+
+---
+
+## 22. vm-network
+
+### Purpose
+
+This test validates networking for a KubeVirt VM in both directions. A Fedora guest on the pod network serves a marker over HTTP through a Service, which a check pod in the namespace fetches (inbound). The guest also runs its own probes and publishes the results alongside the marker (outbound): cluster DNS and the API service, the outside services an AI workload pulls from (huggingface.co, github.com, quay.io and Docker Hub's registry) and ICMP to its gateway and to an external address.
+
+### Architecture
+
+```
+vm [VirtualMachine, Fedora 41 containerDisk, persistent]
+    cloud-init: HTTP server in the guest, marker file, probe run
+    |
+vm-service [headless Service on the VM's pod]
+    |
+check [pass-fail, ephemeral]
+    fetches /marker through the service (inbound)
+    fetches /probes.txt: every probe must report ok (outbound)
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| vm | `quay.io/containerdisks/fedora:41` | none | headless ClusterIP :8080 | 2 vCPU, 2Gi guest memory |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `VM_URL`, `RUN_ID`, `EXPECTED_PROBES` env |
+
+### Pass-fail assertions
+
+1. The guest's marker, served at `/marker`, holds exactly `<run id> from vm-network`: the guest booted, and the namespace reached into it through the Service
+2. `/probes.txt` holds one line per probe (12) and every line starts with `ok`: the guest resolved cluster DNS and each external name, fetched the cluster API service and each external site, and answered pings from its gateway and from 8.8.8.8
+
+### Prerequisites
+
+OpenShift Virtualization installed and the RBAC to create VMs and Services. The external probes depend on the cluster's internet egress and on those services being up, which is deliberate: an AI workload that cannot reach a model hub or a container registry is broken in practice.
+
+### Design rationale
+
+The probes run inside the guest rather than from the check pod because the guest's network path (its masquerade, the node's DNS proxy, its gateway) is the thing under test; probing from a pod would only exercise the pod's path. Results are published as a plain file next to the marker so one HTTP fetch carries both directions, and the check compares the line count against the expected probe total, so a probe run that died partway fails the test instead of passing vacuously. A curl exit code counts as reachable regardless of HTTP status, because registries answer `401` to anonymous fetches and that still proves the path works.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm.sh`.
+
+---
+
+## 23. inference-extended
+
+### Purpose
+
+This test validates that a serving stack behaves, not just that it answers fast. Against a plain vLLM OpenAI server it checks: the model is listed, a factual question gets the right answer, both completion endpoints return the OpenAI response schema, temperature zero repeats itself, streaming chunks terminate with `[DONE]`, unknown models and malformed requests are refused with the right status codes, and stop sequences stay out of the output. Latency is measured and recorded, not asserted: the right budget depends on the workload, so the numbers land in the run artifacts to be read against the workload later.
+
+### Architecture
+
+```
+vllm-server [persistent, 1 GPU]
+    vLLM OpenAI server, granite-3.3-8b-instruct from the models PVC
+    |
+check [pass-fail, ephemeral]
+    correctness, schema, determinism, streaming, errors, stop sequences
+    records time-to-first-token and total time
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| vllm-server | `nvcr.io/nvidia/vllm:26.03-py3` | 1 | headless ClusterIP :8000 | granite-3.3-8b-instruct, max-model-len 10000 |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `SERVER_URL`, `MODEL_NAME` env |
+
+### Pass-fail assertions
+
+1. `/v1/models` lists the served model
+2. "What is the capital of France?" answered with Paris
+3. `/v1/completions` response carries id, object, choices with text and finish reason, and nonzero token usage
+4. `/v1/chat/completions` response carries an assistant message with content and a finish reason
+5. The same temperature-zero request twice gives identical answers
+6. A streaming request delivers content chunks and ends with `data: [DONE]`
+7. An unknown model is refused with 404; a request without messages with 400
+8. A stop sequence never appears in the output, and the finish reason is `stop`
+
+Recorded, not asserted: time-to-first-token and total response time, plus stream chunk counts.
+
+### Prerequisites
+
+One GPU and the granite model on the models PVC, the same server setup guidellm and inference-perf use.
+
+### Design rationale
+
+The benchmark tests tell you how fast the stack is; this one catches behavior bugs benchmarks race past: a broken chat template, nondeterministic sampling, a proxy that swallows `[DONE]`, an error path that returns 200. Determinism and content checks run at temperature zero with no concurrent load, the conditions under which repeatability is actually expected. Latency stays a recorded measurement because a budget that fits one workload fails another, and a subjective read against the workload is more honest than a threshold tuned to pass.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `inference/test-inference-extended.sh`.
+
+---
+
+## 24. vm-storage
+
+### Purpose
+
+This test validates that a VM's disk is real storage. The VM boots from a CDI DataVolume (a fresh PVC into which CDI imports the Fedora image) rather than an ephemeral containerDisk. A marker file written inside the guest on first boot must survive a full VM stop and start. The kernel's boot id, served alongside the marker, must change across the restart, proving the guest really rebooted so the surviving marker is persistence and not a regenerated file.
+
+### Architecture
+
+```
+dv [DataVolume, 10Gi RWO]
+    CDI imports quay.io/containerdisks/fedora:41 into a fresh PVC
+    |
+vm [VirtualMachine, persistent, root disk from the DataVolume]
+    cloud-init: systemd web server in the guest (every boot),
+    marker written once (first boot only), boot id rewritten each boot
+    |
+vm-service [headless Service on the VM's pod]
+    |
+check [pass-fail, ephemeral]
+    boots: waits for the marker
+    stops and starts the VM through the subresources (the reader identity)
+    asserts: same marker after restart, different boot id
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| dv | CDI import of `quay.io/containerdisks/fedora:41` | none | none | 10Gi ReadWriteOnce, node pull method |
+| vm | boots from the DataVolume | none | headless ClusterIP :8080 | 2 vCPU, 2Gi guest memory |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `VM_URL`, `VM_NAME`, `RUN_ID`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+1. The guest boots from the volume and serves `<run id> from vm-storage` (import and boot completed)
+2. After the check stops the VM, the guest stops serving
+3. After the check starts it again, the marker holds exactly the same content: the disk persisted it
+4. The boot id after the restart differs from before: the guest rebooted rather than resuming
+
+Recorded: the time from step start to first successful fetch (import plus first boot).
+
+### Prerequisites
+
+OpenShift Virtualization with CDI, and the RBAC to create DataVolumes and to stop and start VMs through their subresources. The check drives the subresources as the reader identity (the one the playbooks run under), which is the same call `virtctl` makes.
+
+### Design rationale
+
+A containerDisk is thrown away with the pod, so booting from one proves nothing about storage; the DataVolume path is the one a real workload uses. The marker is written under a file-exists guard so only the first boot writes it, and the web server runs from a systemd unit so it starts on every boot while the marker does not regenerate. The boot id check exists because a stop that silently failed, or a VM that resumed instead of rebooting, would otherwise make the marker survival look like persistence.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm-storage.sh`.
+
+---
+
+## 25. vm-migration
+
+### Purpose
+
+This test validates live migration: a running VM moves to another node without rebooting. The disk is a ReadWriteMany DataVolume, reachable from both nodes. The check records the guest's boot id, the VMI's identity and node, and the heartbeat's baseline freshness; then it creates a VirtualMachineInstanceMigration (the object path, the same thing `virtctl migrate` does) and waits for it to succeed. The move counts only if the VMI kept its identity, the node changed, the marker on the disk survived, and the boot id never changed: a reboot would mean the migration was not live.
+
+### Architecture
+
+```
+dv [DataVolume, 10Gi RWX]
+    CDI imports quay.io/containerdisks/fedora:41 into a shared PVC
+    |
+vm [VirtualMachine, persistent, root disk from the DataVolume]
+    cloud-init: systemd web server, marker (first boot only),
+    boot id, heartbeat timestamp rewritten every 100ms
+    |
+vm-service [headless Service on the VM's pod]
+    |
+check [pass-fail, ephemeral]
+    records: VMI uid and node, boot id, baseline heartbeat freshness
+    creates the migration object (the reader identity), waits for Succeeded
+    asserts: same uid, different node, same marker, same boot id
+    records: migration duration, heartbeat pause estimate
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| dv | CDI import of `quay.io/containerdisks/fedora:41` | none | none | 10Gi ReadWriteMany, node pull method |
+| vm | boots from the DataVolume | none | headless ClusterIP :8080 | 2 vCPU, 2Gi guest memory |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `VM_URL`, `VM_NAME`, `RUN_ID`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+1. The guest boots from the shared volume and serves its marker
+2. The migration object reaches phase `Succeeded`
+3. The VMI keeps the same uid (it was migrated, not replaced) and lands on a different node
+4. The marker survives the move unchanged
+5. The boot id is unchanged: the guest never rebooted, which is what makes the migration live
+
+Recorded, not asserted: the migration's duration, the heartbeat's loss of freshness during the move minus its baseline (the guest-visible pause estimate), the longest gap between heartbeat reads, and failed reads.
+
+### Prerequisites
+
+OpenShift Virtualization with CDI, at least two nodes the VM can move between, and the RBAC to create DataVolumes and VirtualMachineInstanceMigrations. The check creates the migration as the reader identity (the one the playbooks run under).
+
+### Design rationale
+
+The heartbeat is a timestamp file the guest rewrites every 100ms; its staleness, sampled from the check pod every 50ms, is the guest's own clock of how long it was frozen, so the pause estimate does not depend on the network's behavior. The baseline is measured before the migration starts and subtracted, which removes clock skew between the guest and the check pod. Timing is recorded rather than asserted for the same reason as every other measurement in this suite: the budget depends on the workload and the platform, and a subjective read against the run is more honest than a tuned threshold.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm-migration.sh`.
+
+---
+
+## 26. vm-evictability
+
+### Purpose
+
+This test validates the asymmetry between container pods and VM pods under eviction pressure. A plain pod asked to evict through the Eviction API yields: the request is accepted and the pod goes away. A VM whose eviction strategy is LiveMigrate does not: its launcher pod's eviction is refused, and the guest keeps running (same marker, same boot id), moving to a new launcher pod if the refusal triggers a live migration. On OpenShift Virtualization 4.22 the refusal comes from KubeVirt's eviction-interceptor admission webhook, whose denial is itself the signal to migrate; older versions guard the pod with a PodDisruptionBudget and answer 429. The test asserts the outcome, refuses-or-not plus the guest surviving, and records whichever mechanism's traces appear. The Eviction API is used directly rather than a node drain, so nothing outside the test's own objects is disturbed.
+
+### Architecture
+
+```
+dv [DataVolume, 10Gi RWX] -> vm [VirtualMachine, evictionStrategy LiveMigrate]
+    |                          guarded by a PodDisruptionBudget
+    |
+plain-pod [persistent, Guaranteed like the launcher, no budget]
+    |
+check [pass-fail, ephemeral]
+    records both pods' QoS class and the namespace's disruption budgets
+    evicts the plain pod: accepted, pod gone
+    evicts the VM's launcher pod: refused (429), guest untouched
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| dv | CDI import of `quay.io/containerdisks/fedora:41` | none | none | 10Gi ReadWriteMany |
+| vm | boots from the DataVolume | none | headless ClusterIP :8080 | 2 vCPU, 2Gi, evictionStrategy LiveMigrate |
+| plain-pod | `registry.redhat.io/ubi9/ubi:9.8` | none | none | Guaranteed: 1 CPU, 1Gi |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `VM_URL`, `VM_NAME`, `PLAIN_POD`, `RUN_ID`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+1. The guest boots from the shared volume and serves its marker
+2. The VM's launcher pod exists, and both pods' QoS classes and the namespace's disruption budgets are recorded
+3. Evicting the plain pod is accepted and the pod disappears (a container yields)
+4. Evicting the VM's launcher pod is refused (the error is recorded, not assumed to be 429) and the guest still serves the same marker with the same boot id through whatever the refusal triggered (a VM does not yield)
+
+Recorded: both pods' QoS classes and the disruption budgets present.
+
+### Prerequisites
+
+OpenShift Virtualization with CDI, and the RBAC to create pod evictions and read PodDisruptionBudgets. The check evicts as the reader identity (the one the playbooks run under).
+
+### Design rationale
+
+The plain pod is Guaranteed, matching the virt-launcher's QoS, so the difference in outcome comes from the VM's eviction protection and not from scheduling class. The refusal itself is the assertion, because protection that silently failed would let the eviction through and kill the guest, exactly the failure a shared node relies on never seeing. The refusal's transport is deliberately not asserted: this platform's webhook denial and an older version's 429 both mean the same thing, and the error text lands in the run artifacts either way. The source suite made the same choice for the same reason: the Eviction API measures evictability without cordoning a node or evicting anyone else's pods.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm-evictability.sh`.
+
+---
+
+## 27. vm-secondary-ipam
+
+### Purpose
+
+This test validates how a secondary network's address pool behaves at its limits. The pod network never runs out first (the kubelet refuses to schedule long before IPAM refuses to allocate) but a secondary network is hand-sized by definition and shared between VMs and containers. The test defines an OVN layer-2 network with six usable addresses (a documentation-range /29 that collides with nothing), fills it with claimant VMs until the next claim is refused, and checks: the refusal happens rather than being silently satisfied, its message names address exhaustion, a container draws from the same pool as the VMs, addresses come back on graceful delete, and a force-deleted launcher pod does not permanently shrink the pool. Everything is observed through what a tenant can see: the Multus network-status annotation on pods, and pod events.
+
+### Architecture
+
+```
+check [pass-fail, ephemeral] creates and drives everything:
+    ipam-<run>-net [NetworkAttachmentDefinition, OVN layer2, 6-address /29]
+    ipam-<run>-c1..cN [CirrOS VMs, masquerade default + bridge secondary]
+    ipam-<run>-container [plain pod annotated onto the same network]
+    fill loop: one claimant at a time until refusal (max 12)
+    container claimant refused by the full pool, then takes a freed address
+    graceful delete: address reusable; force-delete: no leak, respawn served
+```
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| claimant VMs | `quay.io/kubevirt/cirros-container-disk-demo` | none | none | 256Mi, two interfaces |
+| container claimant | `registry.access.redhat.com/ubi9/ubi-minimal:latest` | none | none | annotated onto the network |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `TEST_RANGE`, `MAX_CLAIMANTS`, `CLAIM_TIMEOUT_SECONDS`, `VM_IMAGE`, `RUN_ID`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+1. The secondary network is created by an ordinary project identity
+2. Exactly the six usable addresses are granted: fewer means addresses were lost or reserved, more means the plugin hands out network or broadcast addresses
+3. The seventh claim is refused rather than silently satisfied, and the refusal message names address exhaustion
+4. A container is refused by the same pool the VMs filled (VMs and containers share it)
+5. Deleting a VM frees an address the still-retrying container immediately takes
+6. An address released by gracefully deleted objects is reusable by a new VM
+7. After two force-deletes of a claimant's launcher pod, the respawned pod still receives an address: no permanent leak
+
+Recorded: every granted address, the claimant index where refusal happened, and the refusal reasons.
+
+### Prerequisites
+
+OpenShift Virtualization and the RBAC to define secondary networks, create VMs and pods, and read events. The check drives everything as the reader identity (the one the playbooks run under).
+
+### Design rationale
+
+The allocation record is the Multus network-status annotation on the pod, not the VMI's interface status, because the VMI only learns its address from the guest agent, which CirrOS does not have, and the annotation is what a tenant can actually read. The OVN backend is used rather than a bridge plugin because it needs no node bridge, whose existence the check could not verify without cluster-scoped reads; the tenant-visible records work identically. Deliberately left out, as in the source suite: reading the IPAM plugin's cluster-scoped allocation objects: no namespace role can reach them, and "a user cannot audit allocations" is a finding, not a gap to grant around. Cleanup deletes claimants before the network, in that order, because a network deleted while claimants hold addresses leaves the plugin with allocations it cannot reconcile.
+
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm-secondary-ipam.sh`.
+
+---
+
+## 28. vm-memory-overhead
+
+### Purpose
+
+This test measures what a VM's memory costs the node. The virt-launcher pod reserves the guest's memory plus an overhead of its own (qemu, the launcher container, virtio buffers) so a VM denies the node more than its spec says. Three VMs at 512Mi, 2Gi and 8Gi show the shape: the fixed part of the overhead amortizes as the guest grows. Two invariants are asserted: the launcher never reserves less than the guest was promised, and the guest never reports much less than it was promised. The multipliers themselves are recorded for capacity planning, not asserted.
+
+### Architecture
+
+```
+vm-small / vm-medium / vm-large [persistent, 1 vCPU, 512Mi / 2Gi / 8Gi]
+    Fedora containerDisk, cloud-init serves the guest's MemTotal over HTTP
+    |
+check [pass-fail, ephemeral]
+    per VM: launcher pod's memory request and limit, guest's MemTotal
+    asserts: request >= promise, reported >= 90% of promise
+    records: request, limit, reported, overhead ratio per size
+```
+
+The check reaches each guest directly on its launcher pod's IP, so the test needs no Services.
+
+### Infrastructure
+
+| Name | Image | GPUs | Service | Key config |
+|------|-------|------|---------|------------|
+| vm-small | `quay.io/containerdisks/fedora:41` | none | none | 1 vCPU, 512Mi guest |
+| vm-medium | `quay.io/containerdisks/fedora:41` | none | none | 1 vCPU, 2Gi guest |
+| vm-large | `quay.io/containerdisks/fedora:41` | none | none | 1 vCPU, 8Gi guest |
+| check | `registry.redhat.io/ubi9/ubi:9.8` | none | none | `VM_SPECS`, `RUN_ID`, `READER_TOKEN_FILE` env |
+
+### Pass-fail assertions
+
+For each of the three guest sizes:
+
+1. The launcher pod's memory request, summed over its containers, is at least the guest's promised memory (a VM never under-reserves)
+
+Recorded: the launcher's memory request and limit, the guest's own `MemTotal`, and the overhead ratio (request divided by promise) per size. The guest's view is recorded rather than asserted because the firmware and kernel carve-out grows with the guest (64 to 260MB observed across these sizes), so no single floor fits every size.
+
+### Prerequisites
+
+OpenShift Virtualization, and the RBAC to create VMs and read pods. The check reads the launcher pods as the reader identity (the one the playbooks run under).
+
+### Design rationale
+
+The guest's own view is read from inside the guest rather than from the VMI's status because the VMI learns its memory the same way (from the guest) and serving `/proc/meminfo` over HTTP needs no guest agent. The 90% floor on the guest's view leaves room for the firmware's small carve-out without accepting a guest that sees half its memory. The overhead ratio is a measurement, following this suite's rule for timings: what counts as too much overhead is a judgment against the platform and the workload, not a threshold tuned to pass.
+
+Ported from the [open-science-test-cases](https://github.com/memalhot/open-science-test-cases) suite, `vm-testing/test-vm-memory-overhead.sh`.

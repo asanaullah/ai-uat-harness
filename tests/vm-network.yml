@@ -1,0 +1,150 @@
+# Assisted by Claude Opus
+- name: Plan vm-network
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: vm-network
+    uat_modes: [node]
+
+- name: vm-network
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  vars:
+    serverConfig:
+      vmImage: quay.io/containerdisks/fedora:41
+    # The guest probes cluster DNS and API plus the services an AI workload pulls from.
+    probeDns:
+      - kubernetes.default.svc.cluster.local
+      - huggingface.co
+      - github.com
+      - quay.io
+      - registry-1.docker.io
+    probeHttp:
+      - https://huggingface.co
+      - https://github.com
+      - https://quay.io
+      - https://registry-1.docker.io/v2/
+    expectedProbes: "{{ probeDns | length + probeHttp | length + 3 }}"
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        - name: vm
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: vm
+              resourceConfig:
+                apiVersion: kubevirt.io/v1
+                kind: VirtualMachine
+                spec:
+                  runStrategy: Always
+                  template:
+                    metadata:
+                      labels:
+                        app: vm-network
+                        uat/run: "{{ uat_run_id }}"
+                    spec:
+                      nodeSelector:
+                        kubernetes.io/hostname: "{{ node }}"
+                      tolerations:
+                        - key: nvidia.com/gpu.product
+                          operator: Exists
+                          effect: NoSchedule
+                      terminationGracePeriodSeconds: 0
+                      domain:
+                        cpu:
+                          cores: 2
+                        memory:
+                          guest: 2Gi
+                        resources:
+                          requests: {cpu: 2, memory: 2Gi}
+                          limits: {cpu: 2, memory: 2Gi}
+                        devices:
+                          rng: {}
+                          disks:
+                            - name: rootdisk
+                              disk: {bus: virtio}
+                            - name: cloudinit
+                              disk: {bus: virtio}
+                          interfaces:
+                            - name: default
+                              model: virtio
+                              masquerade: {}
+                      networks:
+                        - name: default
+                          pod: {}
+                      volumes:
+                        - name: rootdisk
+                          containerDisk:
+                            image: "{{ serverConfig.vmImage }}"
+                        - name: cloudinit
+                          cloudInitNoCloud:
+                            userData: |
+                              #cloud-config
+                              runcmd:
+                                - |
+                                  set -u
+                                  mkdir -p /srv/guest
+                                  printf '%s from %s\n' '{{ uat_run_id }}' 'vm-network' > /srv/guest/marker
+                                  cd /srv/guest
+                                  nohup python3 -m http.server 8080 >/var/log/guest-http.log 2>&1 &
+                                  : > /srv/guest/probes.txt
+                                  for h in {{ probeDns | join(' ') }}; do
+                                    if getent hosts "$h" >/dev/null 2>&1; then echo "ok dns $h" >> /srv/guest/probes.txt; else echo "fail dns $h" >> /srv/guest/probes.txt; fi
+                                  done
+                                  if curl -ksS -o /dev/null --max-time 20 https://kubernetes.default.svc.cluster.local/version; then echo "ok http internal kubernetes.default.svc.cluster.local" >> /srv/guest/probes.txt; else echo "fail http internal kubernetes.default.svc.cluster.local" >> /srv/guest/probes.txt; fi
+                                  for u in {{ probeHttp | join(' ') }}; do
+                                    if curl -sS -o /dev/null --max-time 20 "$u"; then echo "ok http external $u" >> /srv/guest/probes.txt; else echo "fail http external $u" >> /srv/guest/probes.txt; fi
+                                  done
+                                  gw="$(ip route | awk '/^default/ {print $3; exit}')"
+                                  if [ -n "$gw" ] && ping -c 3 -W 3 "$gw" >/dev/null 2>&1; then echo "ok icmp gateway $gw" >> /srv/guest/probes.txt; else echo "fail icmp gateway ${gw:-none}" >> /srv/guest/probes.txt; fi
+                                  if ping -c 3 -W 3 8.8.8.8 >/dev/null 2>&1; then echo "ok icmp external 8.8.8.8" >> /srv/guest/probes.txt; else echo "fail icmp external 8.8.8.8" >> /srv/guest/probes.txt; fi
+
+        - name: vm-service
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: vm-service
+              resourceConfig:
+                apiVersion: v1
+                kind: Service
+                spec:
+                  clusterIP: None
+                  selector:
+                    app: vm-network
+                    uat/run: "{{ uat_run_id }}"
+                  ports:
+                    - {port: 8080, targetPort: 8080}
+
+        - name: check
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: check
+              image: registry.redhat.io/ubi9/ubi:9.8
+              labelFilter: pass-fail
+              timeout: 720
+              env:
+                - name: VM_URL
+                  value: 'http://{{ resources["vm-service"].name }}:8080'
+                - name: RUN_ID
+                  value: '{{ uat_run_id }}'
+                - name: EXPECTED_PROBES
+                  value: '{{ expectedProbes }}'
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown

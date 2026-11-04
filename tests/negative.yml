@@ -1,0 +1,171 @@
+# Assisted by Claude Opus
+- name: Plan negative
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: negative
+    uat_modes: [project]
+
+- name: negative
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  vars:
+    readerSecretName: "uat-{{ uat_tid }}-{{ uat_seq.qid }}-reader-token"
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        # Requests no node in this config's inventory can satisfy, so they
+        # stay impossible on any cluster it describes.
+        - name: Read the node values the requests come from
+          ansible.builtin.set_fact:
+            node_gpus: "{{ groups['uat_nodes'] | map('extract', hostvars, ['componentValidation', 'sanity', 'nvidia.com/gpu']) | select('number') | map('int') | list }}"
+            node_mems: "{{ groups['uat_nodes'] | map('extract', hostvars, ['componentValidation', 'sanity', 'memory']) | select('string') | list }}"
+
+        - name: Check the node values
+          ansible.builtin.assert:
+            that:
+              - groups['uat_nodes'] | length > 0
+              - node_mems | length == groups['uat_nodes'] | length
+              - node_mems | map('regex_replace', '^[0-9]+Gi$', 'OK') | unique | list == ['OK']
+            fail_msg: >-
+              The negative test derives its impossible requests from the cluster config's node
+              values: it needs uat_nodes with componentValidation.sanity.memory as <number>Gi
+              on every node, and nvidia.com/gpu where a node has GPUs. Got {{ node_mems | default([]) }}.
+            quiet: true
+
+        - name: Derive the impossible requests
+          ansible.builtin.set_fact:
+            impossible_gpus: "{{ (node_gpus | max | default(0) | int) + 1 }}"
+            impossible_memory: "{{ (node_mems | map('regex_replace', 'Gi$', '') | map('int') | max | int) * 2 }}Gi"
+
+        # The check acts as the identity these playbooks run under, through a
+        # Secret torn down with the sequence.
+        - name: Read the in-pod service account token
+          ansible.builtin.set_fact:
+            reader_token: "{{ lookup('ansible.builtin.file', '/var/run/secrets/kubernetes.io/serviceaccount/token', errors='ignore') | trim }}"
+          when: not uat_dry_run | bool
+
+        - name: Read the token from the kubeconfig
+          ansible.builtin.set_fact:
+            reader_token: "{{ (_kube.users | selectattr('user.token', 'defined') | map(attribute='user.token') | first | default('')) | trim }}"
+          vars:
+            kubeconfig: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') ~ '/.kube/config', true)
+                            | replace('~', lookup('env', 'HOME')) | split(':') | first }}"
+            _kube: "{{ (lookup('ansible.builtin.file', kubeconfig, errors='ignore') | default('', true) | from_yaml) or {} }}"
+          when: not uat_dry_run | bool and (reader_token | default('')) | length == 0
+
+        - name: Stop without a token to check with
+          ansible.builtin.fail:
+            msg: >-
+              No token found to read the pods with. Run from the runner pod (-p),
+              or from a machine logged in with oc login as a member of the project group.
+          when: not uat_dry_run | bool and (reader_token | default('')) | length == 0
+
+        - name: Give the check the reader's token
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: "{{ readerSecretName }}"
+                namespace: "{{ uat_namespace }}"
+                labels: "{{ uat_seq_labels | combine({'app.kubernetes.io/managed-by': uat_managed_by}) }}"
+              type: Opaque
+              stringData:
+                token: "{{ reader_token }}"
+          when: not uat_dry_run | bool
+
+        - name: Tear the reader token down with the sequence
+          ansible.builtin.set_fact:
+            uat_seq_objects: "{{ uat_seq_objects + [{'api_version': 'v1', 'kind': 'Secret', 'namespace': uat_namespace}] }}"
+          when: not uat_dry_run | bool
+
+        # The taint is tolerated so the requests are the only blocker.
+        - name: memory-hog
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: memory-hog
+              resourceConfig:
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  restartPolicy: Never
+                  tolerations:
+                    - key: nvidia.com/gpu.product
+                      operator: Exists
+                      effect: NoSchedule
+                  containers:
+                    - name: memory-hog
+                      image: registry.redhat.io/ubi9/ubi:9.8
+                      command: [sleep, "3600"]
+                      resources:
+                        requests:
+                          memory: "{{ impossible_memory }}"
+                          cpu: "1"
+
+        - name: gpu-hog
+          ansible.builtin.include_role:
+            name: uat_resource
+          vars:
+            step:
+              name: gpu-hog
+              resourceConfig:
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  restartPolicy: Never
+                  tolerations:
+                    - key: nvidia.com/gpu.product
+                      operator: Exists
+                      effect: NoSchedule
+                  containers:
+                    - name: gpu-hog
+                      image: registry.redhat.io/ubi9/ubi:9.8
+                      command: [sleep, "3600"]
+                      # GPUs must not be overcommitted; limits equal requests.
+                      resources:
+                        requests:
+                          nvidia.com/gpu: "{{ impossible_gpus }}"
+                          memory: 1Gi
+                        limits:
+                          nvidia.com/gpu: "{{ impossible_gpus }}"
+                          memory: 1Gi
+
+        - name: check
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: check
+              image: registry.redhat.io/ubi9/ubi:9.8
+              labelFilter: pass-fail
+              env:
+                - name: HOGS
+                  value: '{{ resources["memory-hog"].name }},{{ resources["gpu-hog"].name }}'
+                - name: READER_TOKEN_FILE
+                  value: /var/run/secrets/uat-reader/token
+              volumes:
+                - name: reader-token
+                  secret:
+                    secretName: '{{ readerSecretName }}'
+              volumeMounts:
+                - name: reader-token
+                  mountPath: /var/run/secrets/uat-reader
+                  readOnly: true
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown
