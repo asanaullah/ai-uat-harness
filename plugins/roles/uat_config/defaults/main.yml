@@ -28,7 +28,12 @@ uat_runs_dir: "{{ uat_repo_dir }}/runs"
 uat_cleanup_kinds:
   - {api_version: v1, kind: Pod}
   - {api_version: v1, kind: Service}
+  - {api_version: v1, kind: Secret}
+  - {api_version: monitoring.coreos.com/v1, kind: PodMonitor}
   - {api_version: kubevirt.io/v1, kind: VirtualMachine}
+  - {api_version: cdi.kubevirt.io/v1beta1, kind: DataVolume}
+  - {api_version: kubevirt.io/v1, kind: VirtualMachineInstanceMigration}
+  - {api_version: k8s.cni.cncf.io/v1, kind: NetworkAttachmentDefinition}
   - {api_version: serving.kserve.io/v1beta1, kind: InferenceService}
   - {api_version: serving.kserve.io/v1alpha1, kind: ServingRuntime}
   - {api_version: kubeflow.org/v1, kind: PyTorchJob}
@@ -40,6 +45,8 @@ uat_cleanup_kinds:
   - {api_version: ray.io/v1, kind: RayJob}
   - {api_version: ray.io/v1, kind: RayCluster}
   - {api_version: ray.io/v1, kind: RayService}
+  - {api_version: agent.rossoctl.dev/v1alpha1, kind: AgentRuntime}
+  - {api_version: agents.x-k8s.io/v1alpha1, kind: Sandbox}
 
 uat_runner_image: registry.access.redhat.com/ubi9/python-311:latest
 uat_runner_timeout: 86400

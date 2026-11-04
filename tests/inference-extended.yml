@@ -1,0 +1,80 @@
+# Assisted by Claude Opus
+- name: Plan inference-extended
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: inference-extended
+    uat_modes: [project]
+
+- name: inference-extended
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  vars:
+    serverConfig:
+      image: nvcr.io/nvidia/vllm:26.03-py3
+      model: /models/ibm-granite/granite-3.3-8b-instruct
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        - name: vllm-server
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: vllm-server
+              image: "{{ serverConfig.image }}"
+              service:
+                enabled: true
+                port: 8000
+                name: vllm-server
+                headless: true
+              command:
+                args: [python, -m, vllm.entrypoints.openai.api_server]
+                flags:
+                  model: "{{ serverConfig.model }}"
+                  port: 8000
+                  max-model-len: 10000
+                  gpu-memory-utilization: 0.6
+              env:
+                - name: HOME
+                  value: /tmp
+              ports:
+                - {containerPort: 8000, name: http}
+              readinessProbe:
+                httpGet: {path: /health, port: 8000}
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 30
+              resources:
+                requests: {nvidia.com/gpu: "1"}
+                limits: {nvidia.com/gpu: "1"}
+              persistsThroughSweep: true
+
+        - name: check
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: check
+              image: registry.redhat.io/ubi9/ubi:9.8
+              labelFilter: pass-fail
+              env:
+                - name: SERVER_URL
+                  value: '{{ services["vllm-server"].url }}'
+                - name: MODEL_NAME
+                  value: '{{ serverConfig.model }}'
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown

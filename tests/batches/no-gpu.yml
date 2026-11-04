@@ -8,5 +8,14 @@
 - name: ping
   ansible.builtin.import_playbook: ../ping.yml
 
+- name: metrics-isolation
+  ansible.builtin.import_playbook: ../metrics-isolation.yml
+
+- name: rwx
+  ansible.builtin.import_playbook: ../rwx.yml
+
+- name: negative
+  ansible.builtin.import_playbook: ../negative.yml
+
 - name: Finish
   ansible.builtin.import_playbook: ../../plugins/playbooks/finish.yml

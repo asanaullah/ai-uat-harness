@@ -1,4 +1,4 @@
-collections/
+collections
 runs/
 decisions.md
 __pycache__/
@@ -8,3 +8,4 @@ __pycache__/
 temp/
 TODO.md
 .env
+tests/batches/new.yml
