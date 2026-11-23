@@ -14,8 +14,11 @@
     uat_models_script: |
       set -eu
       export HOME=/tmp
-      pip install --user huggingface_hub
-      export PATH=$HOME/.local/bin:$PATH
+      # A venv of its own: --user is refused in images that already run in
+      # one (UBI's python-312).
+      python3 -m venv /tmp/venv
+      /tmp/venv/bin/pip install -q huggingface_hub
+      export PATH=/tmp/venv/bin:$PATH
       for model in {{ uat_models | join(' ') }}; do
         echo "--- Downloading $model ---"
         hf download "$model" --local-dir "/models/$model"
@@ -43,9 +46,14 @@
               app: model-downloader
           spec:
             restartPolicy: Never
+            # Optional, e.g. {fsGroup: 1001} for a non-root image on a fresh
+            # block-backed volume, whose root directory only root can write.
+            securityContext: "{{ uat_models_security_context | default({}) }}"
             containers:
               - name: model-downloader
-                image: python:3.12-slim
+                # A cluster that allows only some registries (a compliant one)
+                # can set uat_models_image, e.g. registry.access.redhat.com/ubi9/python-312.
+                image: "{{ uat_models_image | default('python:3.12-slim') }}"
                 command: [sh, -c, "{{ uat_models_script }}"]
                 volumeMounts:
                   - {name: models, mountPath: /models}
@@ -56,6 +64,20 @@
       loop: "{{ _uat_targets }}"
       loop_control:
         label: "{{ item.namespace }}/{{ item.pvc }}"
+
+    # The VM disk PVC exists only where tests run VMs (the uat-harness chart,
+    # or uat_setup.vmDisks); a cluster without KubeVirt has none.
+    - name: Check for the VM disk PVC
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        namespace: "{{ uat_namespace }}"
+        name: "{{ uat_models_vm_pvc }}"
+      register: _uat_vm_pvc
+      when: uat_models_vm_pvc | length > 0
+
+    - name: Skip the VM download when there is no VM disk PVC
+      ansible.builtin.set_fact:
+        _uat_models_vm: "{{ uat_models_vm_pvc | length > 0 and (_uat_vm_pvc.resources | default([]) | length > 0) }}"
 
     - name: Start the downloader VM that fills the VM disk
       kubernetes.core.k8s:
@@ -117,7 +139,7 @@
                         runcmd:
                           - /usr/local/bin/download-models.sh 2>&1 | tee /dev/ttyS0
                           - poweroff
-      when: uat_models_vm_pvc | length > 0
+      when: _uat_models_vm | bool
 
     - name: Wait for the downloader pods
       kubernetes.core.k8s_info:
@@ -142,7 +164,7 @@
       until: (_uat_vm.resources | first | default({})).status.printableStatus | default('') == 'Stopped'
       retries: "{{ ((uat_models_timeout | int) / 30) | round(0, 'ceil') | int }}"
       delay: 30
-      when: uat_models_vm_pvc | length > 0
+      when: _uat_models_vm | bool
 
     - name: Read the downloader logs
       kubernetes.core.k8s_log:
@@ -180,7 +202,7 @@
         namespace: "{{ uat_namespace }}"
         name: model-downloader-virt
         wait: true
-      when: uat_models_vm_pvc | length > 0
+      when: _uat_models_vm | bool
 
     - name: Fail when a download failed
       ansible.builtin.fail:

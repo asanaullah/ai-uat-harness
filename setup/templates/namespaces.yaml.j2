@@ -49,7 +49,7 @@ metadata:
   name: {{ c.name }}
   namespace: {{ c.namespace }}
 spec:
-  accessModes: [ReadWriteMany]
+  accessModes: [{{ uat_setup.accessMode | default('ReadWriteMany') }}]
   storageClassName: {{ uat_setup.storageClass | to_json }}
   resources:
     requests:

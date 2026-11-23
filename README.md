@@ -112,7 +112,7 @@ all:
           componentValidation: {sanity: {...}, ideal: {...}}
 ```
 
-The peer and runner settings are optional. A cluster that oac-apps does not manage also needs `uat_setup` for `setup/namespaces.yml`: the storage class, and the groups and users who get access (see `clusters/ocp-test.yml`). On an oac-apps cluster the `uat-harness` chart sets these, so its file has no `uat_setup`. The tool settings in `plugins/roles/uat_config/defaults/main.yml` (images, timeouts, labels) can be overridden in a cluster file, for example `uat_builder_image` for a mirrored registry.
+The peer and runner settings are optional. A cluster that oac-apps does not manage also needs `uat_setup` for `setup/namespaces.yml`: the storage class (and `accessMode`, default `ReadWriteMany`; `ReadWriteOnce` for a single-node cluster whose storage has no shared filesystems, such as a KubeVirt hosted cluster's kubevirt-csi), and the groups and users who get access (see `clusters/ocp-test.yml`). On an oac-apps cluster the `uat-harness` chart sets these, so its file has no `uat_setup`. The tool settings in `plugins/roles/uat_config/defaults/main.yml` (images, timeouts, labels) can be overridden in a cluster file, for example `uat_builder_image` for a mirrored registry.
 
 ## Writing a test
 
@@ -252,7 +252,7 @@ ansible-playbook -i clusters/<cluster>.yml setup/prewarm-images.yml             
 ```
 
 - `namespaces.yml` is for clusters that oac-apps does not manage. It creates the test, peer and runner namespaces, their NetworkPolicies, the PVCs, the Roles and RoleBindings for the groups and users in `uat_setup`, and the runner service account. On an oac-apps cluster such as oac-dev-workload0 the `uat-harness` chart creates these objects, and the cluster file has no `uat_setup`, so the playbook stops at its first check.
-- `models.yml` downloads `uat_models` onto the models PVC in each namespace with a pod, and onto the VM disk PVC (`uat-models-virt`) with a VM that powers off when done.
+- `models.yml` downloads `uat_models` onto the models PVC in each namespace with a pod, and, if the VM disk PVC (`uat-models-virt`) exists, onto it with a VM that powers off when done. The pod's image is `python:3.12-slim`; a cluster that does not allow Docker Hub can set `uat_models_image` in its cluster file. A non-root image writing to a new block-backed volume also needs `uat_models_security_context: {fsGroup: <its group>}`.
 - `prewarm-images.yml` starts a pod per node and image so each node pulls the images the tests use, reports any that did not pull, and deletes the pods. `-e '{"uat_prewarm_images": [...]}'` limits the images.
 
 ## Running in the cluster
