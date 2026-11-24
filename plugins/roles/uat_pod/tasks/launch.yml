@@ -47,8 +47,9 @@
             if (_uat_store.models.pvc | default('')) | length > 0 else [])
          + step.volumes | default([]) }}
     uat_seq_objects: >-
-      {{ uat_seq_objects + [{'api_version': 'v1', 'kind': 'Pod', 'namespace': namespace},
-                            {'api_version': 'v1', 'kind': 'Service', 'namespace': namespace}] }}
+      {{ uat_seq_objects + [{'api_version': 'v1', 'kind': 'Pod', 'namespace': namespace}]
+         + ([{'api_version': 'v1', 'kind': 'Service', 'namespace': namespace}]
+            if step.service.enabled | default(false) | bool else []) }}
 
 - name: "Render the manifests of {{ _uat_dir }}"
   ansible.builtin.set_fact:

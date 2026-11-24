@@ -11,7 +11,7 @@ runs/<run-id>/: metadata, step records, timesheet, pod logs, failure
 diagnostics, and the results copied back from the cluster.
 
 What to run:
-  -c FILE     cluster config (an inventory under clusters/), required
+  -c FILE     cluster config (an inventory under clusters/); -a defaults to clusters/uat-admin.yml
   -b FILE     batch playbook to run
   -t LIST     tests to run, comma-separated, e.g. fio,iperf3 (after the batch if both are given)
 
@@ -24,18 +24,19 @@ Options for every test in the run:
 Where to run:
   -r RUN_ID   run id (default: the UTC time, YYYYmmdd_HHMMSS)
   -p          run in a runner pod on the cluster instead of from this machine
-  -g URL      with -p: the runner pod clones this git repo instead of using the local files
-  -G REF      with -g: branch or tag to clone
+  -g URL      with -p or -a: the runner pod clones this git repo; -a defaults to the harness repo
+  -G REF      with -p or -a: branch or tag to clone
   -k          with -p: start the runner pod and return without waiting
   -F RUN_ID   copy a finished runner-pod run back from the cluster (with -c)
+  -a          admin run: implies -p; runner and tests use uat-admin
   -h          show this help
 EOF
 }
 
 command_line="$0 $*"
 cluster="" batch="" tests="" mode="" policy="" nodes="" dry=false
-run_id="" in_pod=false repo="" ref="" detach=false fetch=""
-while getopts "c:b:t:m:f:n:dr:pg:G:kF:h" opt; do
+run_id="" in_pod=false repo="" ref="" detach=false fetch="" admin=false
+while getopts "c:b:t:m:f:n:dr:pag:G:kF:h" opt; do
   case "$opt" in
     c) cluster="$OPTARG" ;;
     b) batch="$OPTARG" ;;
@@ -46,6 +47,7 @@ while getopts "c:b:t:m:f:n:dr:pg:G:kF:h" opt; do
     d) dry=true ;;
     r) run_id="$OPTARG" ;;
     p) in_pod=true ;;
+    a) admin=true ;;
     g) repo="$OPTARG" ;;
     G) ref="$OPTARG" ;;
     k) detach=true ;;
@@ -57,6 +59,9 @@ done
 shift $((OPTIND - 1))
 
 args=("$@")
+if $admin && [ -z "$cluster" ]; then
+  cluster="$(dirname "$(realpath "$0")")/clusters/uat-admin.yml"
+fi
 [ -n "$cluster" ] || { echo "-c is required" >&2; usage >&2; exit 2; }
 [ -f "$cluster" ] || { echo "cluster config not found: $cluster" >&2; exit 2; }
 [ -z "$batch" ] || [ -f "$batch" ] || { echo "batch not found: $batch" >&2; exit 2; }
@@ -64,6 +69,18 @@ cluster="$(realpath "$cluster")"
 [ -z "$batch" ] || batch="$(realpath "$batch")"
 cd "$(dirname "$(realpath "$0")")"
 [ -d collections/ansible_collections/kubernetes/core ] || { echo "collections missing; run ./build.sh first" >&2; exit 1; }
+
+if $admin; then
+  if ! oc --as system:admin auth can-i create pods -n uat-admin >/dev/null 2>&1; then
+    echo "-a needs a kubeconfig that can act as system:admin and create pods in uat-admin" >&2
+    exit 2
+  fi
+  admin_vars='{"uat_namespace":"uat-admin","uat_peer_namespace":"","uat_storage":{"pvc":"uat-admin-storage","basePath":"uat/results"},"uat_runner":{"namespace":"uat-admin","serviceAccount":"uat-admin-sa","pvc":"uat-admin-storage"}}'
+  [ -n "$repo" ] || repo="https://github.com/asanaullah/ai-uat-harness.git"
+  export K8S_AUTH_IMPERSONATE_USER=system:admin
+  args=(-e "$admin_vars" "${args[@]}")
+  in_pod=true
+fi
 
 runs_dir="${UAT_RUNS_DIR:-$PWD/runs}"
 if [ -n "$fetch" ]; then
@@ -109,6 +126,7 @@ if $in_pod; then
   [ -n "$policy" ] && pod_args+=(-f "$policy")
   [ -n "$nodes" ] && pod_args+=(-n "$nodes")
   $dry && pod_args+=(-d)
+  $admin && pod_args+=(-- -e "$admin_vars")
   python3 - "$vars" "$repo" "$ref" "$detach" "${pod_args[@]}" <<'PY'
 import json, shlex, sys
 path, repo, ref, detach = sys.argv[1:5]
