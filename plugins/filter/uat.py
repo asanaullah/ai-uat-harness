@@ -159,6 +159,24 @@ def uat_subjects(groups, users=None):
     ]
 
 
+def uat_active_runs(pods, run_id):
+    """Runs with a pod still going, excluding this run and its runner pod."""
+    runs = []
+    for pod in pods or []:
+        metadata = pod.get("metadata") or {}
+        if metadata.get("deletionTimestamp"):
+            continue
+        if (pod.get("status") or {}).get("phase") not in ("Pending", "Running"):
+            continue
+        labels = metadata.get("labels") or {}
+        run = labels.get("uat/run", "")
+        if not run or run == run_id:
+            continue
+        if run not in runs:
+            runs.append(run)
+    return sorted(runs)
+
+
 class FilterModule:
     def filters(self):
         return {
@@ -172,4 +190,5 @@ class FilterModule:
             "uat_enumerate": uat_enumerate,
             "uat_go_places": uat_go_places,
             "uat_subjects": uat_subjects,
+            "uat_active_runs": uat_active_runs,
         }

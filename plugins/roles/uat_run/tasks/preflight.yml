@@ -16,9 +16,7 @@
   ansible.builtin.set_fact:
     _uat_active_runs: >-
       {{ (_uat_leftovers.results | selectattr('item.kind', 'equalto', 'Pod') | first).resources | default([])
-         | rejectattr('metadata.deletionTimestamp', 'defined')
-         | selectattr('status.phase', 'in', ['Pending', 'Running'])
-         | map(attribute='metadata.labels') | map(attribute='uat/run', default='?') | unique | list }}
+         | uat_active_runs(uat_run_id) }}
 
 - name: "Stop if another run is still going in {{ uat_store.namespace }}"
   ansible.builtin.assert:
@@ -40,7 +38,9 @@
   loop: "{{ _uat_leftovers.results | selectattr('resources', 'defined') | subelements('resources') }}"
   loop_control:
     label: "{{ item.0.item.kind }}/{{ item.1.metadata.name }}"
-  when: item.1.metadata.deletionTimestamp is not defined
+  when:
+    - item.1.metadata.deletionTimestamp is not defined
+    - (item.1.metadata.labels['uat/run'] | default('')) != uat_run_id
   register: _uat_deleted
 
 - name: "Record the preflight in {{ uat_store.namespace }}"
