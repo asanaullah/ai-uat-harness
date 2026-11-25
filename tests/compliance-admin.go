@@ -1460,14 +1460,31 @@ var _ = Describe("Compliance admin", Label("pass-fail"), func() {
 			return
 		}
 
-		clfGVR := schema.GroupVersionResource{Group: "logging.openshift.io", Version: "v1", Resource: "clusterlogforwarders"}
-		clfs, err := dynamicClient.Resource(clfGVR).Namespace(loggingNS).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			if isMissing(err) {
-				failures = append(failures, "no ClusterLogForwarder API: audit logs are not forwarded")
-			} else {
-				failures = append(failures, fmt.Sprintf("list ClusterLogForwarders: %v", err))
+		// Cluster Logging 6 moved ClusterLogForwarder from logging.openshift.io
+		// to observability.openshift.io, keeping spec.pipelines[].inputRefs.
+		// Try the current group first and fall back, or a cluster that is
+		// forwarding its audit logs is reported as not forwarding them.
+		clfGVRs := []schema.GroupVersionResource{
+			{Group: "observability.openshift.io", Version: "v1", Resource: "clusterlogforwarders"},
+			{Group: "logging.openshift.io", Version: "v1", Resource: "clusterlogforwarders"},
+		}
+		var clfs *unstructured.UnstructuredList
+		missing := 0
+		for _, gvr := range clfGVRs {
+			clfs, err = dynamicClient.Resource(gvr).Namespace(loggingNS).List(ctx, metav1.ListOptions{})
+			if err == nil {
+				break
 			}
+			if isMissing(err) {
+				missing++
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("list ClusterLogForwarders (%s): %v", gvr.Group, err))
+			Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+			return
+		}
+		if missing == len(clfGVRs) {
+			failures = append(failures, "no ClusterLogForwarder API: audit logs are not forwarded")
 			Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
 			return
 		}
@@ -2643,26 +2660,31 @@ var _ = Describe("Compliance admin", Label("pass-fail"), func() {
 				failures = append(failures, fmt.Sprintf("%s list NetworkPolicies: %v", namespace.Name, err))
 				continue
 			}
-			found := false
+			// A namespace is default-denied by one policy covering both
+			// directions or, as the Kubernetes documentation also shows, by a
+			// default-deny-ingress and a default-deny-egress alongside each
+			// other. Cover is therefore accumulated across every policy that
+			// selects all pods and permits nothing.
+			deniesIngress, deniesEgress := false, false
 			for _, policy := range policies.Items {
 				selector := policy.Spec.PodSelector
 				if len(selector.MatchLabels) > 0 || len(selector.MatchExpressions) > 0 {
 					continue
 				}
-				hasIngress, hasEgress := false, false
 				for _, policyType := range policy.Spec.PolicyTypes {
 					switch string(policyType) {
 					case "Ingress":
-						hasIngress = true
+						if len(policy.Spec.Ingress) == 0 {
+							deniesIngress = true
+						}
 					case "Egress":
-						hasEgress = true
+						if len(policy.Spec.Egress) == 0 {
+							deniesEgress = true
+						}
 					}
 				}
-				if hasIngress && hasEgress && len(policy.Spec.Ingress) == 0 && len(policy.Spec.Egress) == 0 {
-					found = true
-					break
-				}
 			}
+			found := deniesIngress && deniesEgress
 			if !found {
 				failures = append(failures, fmt.Sprintf("%s has no default-deny NetworkPolicy", namespace.Name))
 			}

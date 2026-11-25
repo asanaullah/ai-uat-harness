@@ -5,7 +5,14 @@
       - uat_runner.namespace is defined
       - uat_runner.serviceAccount is defined
       - uat_runner.pvc is defined
-    fail_msg: The cluster config needs uat_runner.namespace, uat_runner.serviceAccount and uat_runner.pvc to run in a pod.
+    fail_msg: >-
+      The cluster config needs uat_runner.namespace, uat_runner.serviceAccount
+      and uat_runner.pvc to run in a pod.
+      {{ ' In admin mode (-a) these are the admin runner: namespace
+      uat-admin-runner, serviceAccount uat-admin-runner-sa and pvc
+      uat-admin-runner-storage, as setup/uat-admin.yaml creates them, with
+      uat_storage.pvc uat-admin-storage. Use an admin cluster file rather
+      than the ordinary one.' if uat_admin_run | default(false) | bool else '' }}
     quiet: true
 
 - name: Name the runner pod
