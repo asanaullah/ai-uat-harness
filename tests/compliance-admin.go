@@ -2660,26 +2660,31 @@ var _ = Describe("Compliance admin", Label("pass-fail"), func() {
 				failures = append(failures, fmt.Sprintf("%s list NetworkPolicies: %v", namespace.Name, err))
 				continue
 			}
-			found := false
+			// A namespace is default-denied by one policy covering both
+			// directions or, as the Kubernetes documentation also shows, by a
+			// default-deny-ingress and a default-deny-egress alongside each
+			// other. Cover is therefore accumulated across every policy that
+			// selects all pods and permits nothing.
+			deniesIngress, deniesEgress := false, false
 			for _, policy := range policies.Items {
 				selector := policy.Spec.PodSelector
 				if len(selector.MatchLabels) > 0 || len(selector.MatchExpressions) > 0 {
 					continue
 				}
-				hasIngress, hasEgress := false, false
 				for _, policyType := range policy.Spec.PolicyTypes {
 					switch string(policyType) {
 					case "Ingress":
-						hasIngress = true
+						if len(policy.Spec.Ingress) == 0 {
+							deniesIngress = true
+						}
 					case "Egress":
-						hasEgress = true
+						if len(policy.Spec.Egress) == 0 {
+							deniesEgress = true
+						}
 					}
 				}
-				if hasIngress && hasEgress && len(policy.Spec.Ingress) == 0 && len(policy.Spec.Egress) == 0 {
-					found = true
-					break
-				}
 			}
+			found := deniesIngress && deniesEgress
 			if !found {
 				failures = append(failures, fmt.Sprintf("%s has no default-deny NetworkPolicy", namespace.Name))
 			}
