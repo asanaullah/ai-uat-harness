@@ -4,6 +4,8 @@ package test
 import (
 	"context"
 	"fmt"
+	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -256,6 +258,12 @@ var _ = Describe("Compliance hub", Label("pass-fail"), func() {
 
 	It("H-06 Hosted NodePools have their requested nodes", func() {
 		ctx := context.Background()
+		var parkedNodePools *regexp.Regexp
+		if p := os.Getenv("PARKED_NODEPOOLS"); p != "" {
+			var err error
+			parkedNodePools, err = regexp.Compile(p)
+			Expect(err).NotTo(HaveOccurred(), "PARKED_NODEPOOLS is not a valid regex")
+		}
 		var failures []string
 		for _, cluster := range hubClusters {
 			gvr := schema.GroupVersionResource{
@@ -288,10 +296,15 @@ var _ = Describe("Compliance hub", Label("pass-fail"), func() {
 					desired = 1
 				}
 				have, _, _ := unstructured.NestedInt64(pool.Object, "status", "replicas")
-				if have != desired {
-					failures = append(failures, fmt.Sprintf("%s NodePool %s has %d of %d nodes", cluster.name, pool.GetName(), have, desired))
-				} else {
+				switch {
+				case have == desired:
 					fmt.Printf("PASS %s NodePool %s has %d of %d nodes\n", cluster.name, pool.GetName(), have, desired)
+				case parkedNodePools != nil && parkedNodePools.MatchString(cluster.name+"/"+pool.GetName()):
+					// Parked on purpose: a GPU VM worker is often stopped
+					// between runs so it does not hold its GPUs.
+					fmt.Printf("NOTE %s NodePool %s has %d of %d nodes, parked by PARKED_NODEPOOLS\n", cluster.name, pool.GetName(), have, desired)
+				default:
+					failures = append(failures, fmt.Sprintf("%s NodePool %s has %d of %d nodes", cluster.name, pool.GetName(), have, desired))
 				}
 			}
 			if count == 0 {

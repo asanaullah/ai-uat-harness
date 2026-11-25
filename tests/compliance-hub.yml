@@ -13,6 +13,11 @@
     serverConfig:
       namespace: uat-admin
       serviceAccount: uat-admin-sa
+      # NodePools whose node count is not enforced, as a regex over
+      # "<cluster>/<nodepool>". A cluster can be parked on purpose: a GPU VM
+      # worker is often stopped between runs so it does not hold its GPUs,
+      # and then 0 of 1 nodes is the intended state rather than a fault.
+      parkedNodePools: "{{ (uat_compliance | default({})).parkedNodePools | default('') }}"
   tasks:
     - name: Start the sequence
       ansible.builtin.import_role:
@@ -33,6 +38,8 @@
               env:
                 - name: UAT_ADMIN_NAMESPACE
                   value: "{{ serverConfig.namespace }}"
+                - name: PARKED_NODEPOOLS
+                  value: "{{ serverConfig.parkedNodePools }}"
       rescue:
         - name: Handle the failure
           ansible.builtin.import_role:
