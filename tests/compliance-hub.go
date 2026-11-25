@@ -300,4 +300,44 @@ var _ = Describe("Compliance hub", Label("pass-fail"), func() {
 		}
 		Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
 	})
+
+	It("H-07 HostedClusters have an OAuth callback URL", func() {
+		ctx := context.Background()
+		var failures []string
+		for _, cluster := range hubClusters {
+			obj, err := hubDynamicClient.Resource(hubClusterGVR).Namespace(cluster.namespace).Get(ctx, cluster.name, metav1.GetOptions{})
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s read HostedCluster: %v", cluster.name, err))
+				continue
+			}
+			callback, _, _ := unstructured.NestedString(obj.Object, "status", "oauthCallbackURLTemplate")
+			if callback == "" {
+				failures = append(failures, fmt.Sprintf("%s has no status.oauthCallbackURLTemplate", cluster.name))
+			} else {
+				fmt.Printf("PASS %s OAuth callback URL template\n", cluster.name)
+			}
+		}
+		Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+	})
+
+	It("H-08 hub has one default StorageClass", func() {
+		ctx := context.Background()
+		scs, err := hubClientset.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		var defaults []string
+		for _, sc := range scs.Items {
+			if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" ||
+				sc.Annotations["storageclass.beta.kubernetes.io/is-default-class"] == "true" {
+				defaults = append(defaults, sc.Name)
+			}
+		}
+		switch {
+		case len(defaults) == 0:
+			Fail("hub has no default StorageClass")
+		case len(defaults) > 1:
+			fmt.Printf("WARN hub has multiple default StorageClasses: %s\n", strings.Join(defaults, ", "))
+		default:
+			fmt.Printf("PASS hub default StorageClass %s\n", defaults[0])
+		}
+	})
 })

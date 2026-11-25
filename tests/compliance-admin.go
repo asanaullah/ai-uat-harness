@@ -21,6 +21,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -603,6 +604,173 @@ func virtualMachineTestSpec(obj map[string]interface{}, kind string) map[string]
 	}
 	spec, _, _ := unstructured.NestedMap(obj, "spec")
 	return spec
+}
+
+type gpuVMFinding struct {
+	level   string
+	message string
+}
+
+func evaluateGPUTenancy(vmis []unstructured.Unstructured) []gpuVMFinding {
+	byNode := map[string]map[string]bool{}
+	for _, item := range vmis {
+		if len(gpuDeviceNames(virtualMachineTestSpec(item.Object, "VirtualMachineInstance"))) == 0 {
+			continue
+		}
+		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+		if phase == "Succeeded" || phase == "Failed" {
+			continue
+		}
+		node, _, _ := unstructured.NestedString(item.Object, "status", "nodeName")
+		if node == "" {
+			continue
+		}
+		if byNode[node] == nil {
+			byNode[node] = map[string]bool{}
+		}
+		byNode[node][item.GetNamespace()] = true
+	}
+	if len(byNode) == 0 {
+		return []gpuVMFinding{{level: "PASS", message: "tenancy: no GPU VM running"}}
+	}
+	var out []gpuVMFinding
+	for node, namespaces := range byNode {
+		if len(namespaces) > 1 {
+			var names []string
+			for namespace := range namespaces {
+				names = append(names, namespace)
+			}
+			sort.Strings(names)
+			out = append(out, gpuVMFinding{level: "FAIL", message: fmt.Sprintf("tenancy: %s runs GPU VMs from %d namespaces: %s", node, len(names), strings.Join(names, ", "))})
+		} else {
+			for namespace := range namespaces {
+				out = append(out, gpuVMFinding{level: "PASS", message: fmt.Sprintf("tenancy: %s runs GPU VMs from one namespace (%s)", node, namespace)})
+			}
+		}
+	}
+	return out
+}
+
+func evaluateGPUEviction(vms []unstructured.Unstructured, hcoDefault string) []gpuVMFinding {
+	var out []gpuVMFinding
+	for _, item := range vms {
+		spec := virtualMachineTestSpec(item.Object, "VirtualMachine")
+		if len(gpuDeviceNames(spec)) == 0 {
+			continue
+		}
+		name := item.GetNamespace() + "/" + item.GetName()
+		own, found, _ := unstructured.NestedString(spec, "evictionStrategy")
+		effective := hcoDefault
+		where := "from the HyperConverged"
+		if found && own != "" {
+			effective = own
+			where = "own"
+		}
+		if effective == "LiveMigrate" {
+			out = append(out, gpuVMFinding{level: "FAIL", message: fmt.Sprintf("eviction: GPU VM %s: evictionStrategy LiveMigrate (%s) blocks every drain", name, where)})
+		} else {
+			out = append(out, gpuVMFinding{level: "PASS", message: fmt.Sprintf("eviction: GPU VM %s: evictionStrategy %s (%s)", name, effective, where)})
+		}
+	}
+	if len(out) == 0 {
+		return []gpuVMFinding{{level: "PASS", message: "eviction: no GPU VM defined"}}
+	}
+	return out
+}
+
+func evaluateGPUDisk(vms []unstructured.Unstructured) []gpuVMFinding {
+	var out []gpuVMFinding
+	for _, item := range vms {
+		spec := virtualMachineTestSpec(item.Object, "VirtualMachine")
+		if len(gpuDeviceNames(spec)) == 0 {
+			continue
+		}
+		name := item.GetNamespace() + "/" + item.GetName()
+		volumes, _, _ := unstructured.NestedSlice(spec, "volumes")
+		var containerDisks []string
+		for _, raw := range volumes {
+			volume, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if _, found := volume["containerDisk"]; found {
+				containerDisks = append(containerDisks, fmt.Sprintf("%v", volume["name"]))
+			}
+		}
+		if len(containerDisks) > 0 {
+			out = append(out, gpuVMFinding{level: "WARN", message: fmt.Sprintf("disk: GPU VM %s boots from containerDisk %s; use a DataVolume or retest", name, strings.Join(containerDisks, ", "))})
+		} else {
+			out = append(out, gpuVMFinding{level: "PASS", message: fmt.Sprintf("disk: GPU VM %s uses no containerDisk", name)})
+		}
+	}
+	if len(out) == 0 {
+		return []gpuVMFinding{{level: "PASS", message: "disk: no GPU VM defined"}}
+	}
+	return out
+}
+
+func evaluateGPUPermitted(advertised map[string][]string, hco, kv map[string]bool) []gpuVMFinding {
+	if len(advertised) == 0 {
+		return []gpuVMFinding{{level: "PASS", message: "permitted: no node advertises a passthrough GPU"}}
+	}
+	var out []gpuVMFinding
+	for resource, nodeNames := range advertised {
+		var missing, internal []string
+		if _, ok := hco[resource]; !ok {
+			missing = append(missing, "HyperConverged")
+		} else if !hco[resource] {
+			internal = append(internal, "HyperConverged")
+		}
+		if _, ok := kv[resource]; !ok {
+			missing = append(missing, "KubeVirt")
+		} else if !kv[resource] {
+			internal = append(internal, "KubeVirt")
+		}
+		switch {
+		case len(missing) > 0:
+			out = append(out, gpuVMFinding{level: "FAIL", message: fmt.Sprintf("permitted: %s (on %s) not in permittedHostDevices of %s", resource, strings.Join(nodeNames, ", "), strings.Join(missing, " and "))})
+		case len(internal) > 0:
+			out = append(out, gpuVMFinding{level: "FAIL", message: fmt.Sprintf("permitted: %s has externalResourceProvider false on %s", resource, strings.Join(internal, " and "))})
+		default:
+			out = append(out, gpuVMFinding{level: "PASS", message: fmt.Sprintf("permitted: %s permitted on the HyperConverged and KubeVirt", resource)})
+		}
+	}
+	return out
+}
+
+func evaluateGPUSandbox(vmNodes []string, policies []unstructured.Unstructured) []gpuVMFinding {
+	if len(policies) == 0 {
+		if len(vmNodes) > 0 {
+			return []gpuVMFinding{{level: "FAIL", message: fmt.Sprintf("sandbox: no ClusterPolicy, but %s labelled for VMs", strings.Join(vmNodes, ", "))}}
+		}
+		return nil
+	}
+	sandbox, _, _ := unstructured.NestedMap(policies[0].Object, "spec", "sandboxWorkloads")
+	enabled := false
+	if sandbox != nil {
+		enabled, _, _ = unstructured.NestedBool(sandbox, "enabled")
+	}
+	var out []gpuVMFinding
+	switch {
+	case enabled:
+		out = append(out, gpuVMFinding{level: "PASS", message: "sandbox: sandboxWorkloads enabled"})
+	case len(vmNodes) > 0:
+		out = append(out, gpuVMFinding{level: "FAIL", message: fmt.Sprintf("sandbox: sandboxWorkloads off, so the VM label on %s does nothing", strings.Join(vmNodes, ", "))})
+	default:
+		out = append(out, gpuVMFinding{level: "PASS", message: "sandbox: sandboxWorkloads off, and no node labelled for VMs"})
+	}
+	if enabled {
+		defaultWorkload, found, _ := unstructured.NestedString(sandbox, "defaultWorkload")
+		if !found || defaultWorkload == "" {
+			defaultWorkload = "container"
+		}
+		if defaultWorkload == "container" {
+			out = append(out, gpuVMFinding{level: "PASS", message: "sandbox: defaultWorkload container"})
+		} else {
+			out = append(out, gpuVMFinding{level: "WARN", message: fmt.Sprintf("sandbox: defaultWorkload %s: every unlabelled GPU node serves VMs", defaultWorkload)})
+		}
+	}
+	return out
 }
 
 func permittedHostDevices(spec map[string]interface{}) map[string]bool {
@@ -2612,5 +2780,313 @@ var _ = Describe("Compliance admin", Label("pass-fail"), func() {
 			}
 		}
 		Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+	})
+
+	It("C-10 GPU passthrough preflight", func() {
+		ctx := context.Background()
+		nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		var gpuNodes []corev1.Node
+		for _, node := range nodes.Items {
+			if nodeHasGPU(&node) {
+				gpuNodes = append(gpuNodes, node)
+			}
+		}
+		if len(gpuNodes) == 0 {
+			Skip("no GPU nodes")
+		}
+
+		var failures []string
+		schedulable := 0
+		for _, node := range gpuNodes {
+			if node.Labels["kubevirt.io/schedulable"] == "true" {
+				schedulable++
+			}
+		}
+		if schedulable == 0 {
+			failures = append(failures, "no GPU node has kubevirt.io/schedulable=true")
+		} else {
+			fmt.Printf("PASS %d GPU node(s) can host VMs\n", schedulable)
+		}
+
+		nfdGVR := schema.GroupVersionResource{Group: "nfd.openshift.io", Version: "v1alpha1", Resource: "nodefeatures"}
+		features, err := dynamicClient.Resource(nfdGVR).List(ctx, metav1.ListOptions{})
+		switch {
+		case isMissing(err):
+			fmt.Println("WARN no NodeFeature API: cannot read the kernel IOMMU configuration")
+		case err != nil:
+			failures = append(failures, fmt.Sprintf("list NodeFeatures: %v", err))
+		default:
+			target := gpuNodes[0].Name
+			var feature *unstructured.Unstructured
+			for i := range features.Items {
+				item := &features.Items[i]
+				nodeName, _, _ := unstructured.NestedString(item.Object, "spec", "nodeName")
+				if nodeName == "" {
+					nodeName = item.GetName()
+				}
+				if nodeName == target {
+					feature = item
+					break
+				}
+			}
+			if feature == nil {
+				fmt.Printf("WARN no NodeFeature for GPU node %s\n", target)
+				break
+			}
+			elements, found, err := unstructured.NestedStringMap(feature.Object, "spec", "features", "attributes", "kernel", "config", "elements")
+			if err != nil || !found {
+				rawElements, rawFound, _ := unstructured.NestedMap(feature.Object, "spec", "features", "attributes", "kernel", "config", "elements")
+				if !rawFound {
+					fmt.Printf("WARN NodeFeature %s has no kernel config elements\n", target)
+					break
+				}
+				elements = map[string]string{}
+				for key, value := range rawElements {
+					elements[key] = fmt.Sprint(value)
+				}
+			}
+			iommu := false
+			for _, key := range []string{"AMD_IOMMU", "INTEL_IOMMU", "CONFIG_AMD_IOMMU", "CONFIG_INTEL_IOMMU"} {
+				if value, ok := elements[key]; ok && (value == "y" || value == "true") {
+					iommu = true
+					break
+				}
+			}
+			if iommu {
+				fmt.Printf("PASS NodeFeature %s has an IOMMU driver\n", target)
+			} else {
+				failures = append(failures, fmt.Sprintf("NodeFeature %s has no AMD or Intel IOMMU driver", target))
+			}
+		}
+
+		hcoGVR := schema.GroupVersionResource{Group: "hco.kubevirt.io", Version: "v1", Resource: "hyperconvergeds"}
+		hco, err := dynamicClient.Resource(hcoGVR).Namespace("openshift-cnv").Get(ctx, "kubevirt-hyperconverged", metav1.GetOptions{})
+		if isMissing(err) {
+			failures = append(failures, "no HyperConverged: OpenShift Virtualization is not installed")
+		} else if err != nil {
+			failures = append(failures, fmt.Sprintf("read HyperConverged: %v", err))
+		} else {
+			hcoSpec, _, _ := unstructured.NestedMap(hco.Object, "spec")
+			if len(permittedHostDevices(hcoSpec)) == 0 {
+				fmt.Println("WARN permittedHostDevices is empty: no PCI device is allow-listed for VMs")
+			} else {
+				fmt.Println("PASS permittedHostDevices has entries")
+			}
+		}
+
+		policyGVR := schema.GroupVersionResource{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}
+		policies, err := dynamicClient.Resource(policyGVR).List(ctx, metav1.ListOptions{})
+		if isMissing(err) || policies == nil || len(policies.Items) == 0 {
+			fmt.Println("WARN no GPU Operator ClusterPolicy")
+		} else {
+			sandbox, _, _ := unstructured.NestedMap(policies.Items[0].Object, "spec", "sandboxWorkloads")
+			enabled := false
+			if sandbox != nil {
+				enabled, _, _ = unstructured.NestedBool(sandbox, "enabled")
+			}
+			if !enabled {
+				failures = append(failures, "ClusterPolicy sandboxWorkloads is disabled")
+			} else {
+				mode, _, _ := unstructured.NestedString(sandbox, "mode")
+				if mode != "kubevirt" {
+					fmt.Printf("WARN ClusterPolicy sandboxWorkloads mode=%q, expected kubevirt\n", mode)
+				} else {
+					fmt.Println("PASS ClusterPolicy sandboxWorkloads mode=kubevirt")
+				}
+			}
+		}
+		Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+	})
+
+	It("C-11 tenant pinning for GPU namespaces", func() {
+		ctx := context.Background()
+		vmiGVR := schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"}
+		vmis, err := dynamicClient.Resource(vmiGVR).List(ctx, metav1.ListOptions{})
+		if isMissing(err) {
+			Skip("no VirtualMachineInstance API")
+		}
+		Expect(err).NotTo(HaveOccurred())
+		gpuNodes := map[string]string{}
+		if vmis != nil {
+			for _, item := range vmis.Items {
+				if len(gpuDeviceNames(virtualMachineTestSpec(item.Object, "VirtualMachineInstance"))) == 0 {
+					continue
+				}
+				phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+				if phase == "Succeeded" || phase == "Failed" {
+					continue
+				}
+				node, _, _ := unstructured.NestedString(item.Object, "status", "nodeName")
+				if node != "" {
+					gpuNodes[item.GetNamespace()] = node
+				}
+			}
+		}
+		if len(gpuNodes) == 0 {
+			Skip("no GPU VMs running")
+		}
+
+		namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		annotations := map[string]string{}
+		for _, namespace := range namespaces.Items {
+			annotations[namespace.Name] = namespace.Annotations["openshift.io/node-selector"]
+		}
+
+		var failures []string
+		pinned := map[string][]string{}
+		for namespace, node := range gpuNodes {
+			selector := annotations[namespace]
+			if selector == "" {
+				fmt.Printf("WARN %s runs GPU VMs but has no openshift.io/node-selector\n", namespace)
+				continue
+			}
+			host := ""
+			for _, part := range strings.Split(selector, ",") {
+				part = strings.TrimSpace(part)
+				if strings.HasPrefix(part, "kubernetes.io/hostname=") {
+					host = strings.TrimPrefix(part, "kubernetes.io/hostname=")
+				}
+			}
+			if host == "" {
+				fmt.Printf("WARN %s has a node selector without kubernetes.io/hostname: %q\n", namespace, selector)
+				continue
+			}
+			if host != node {
+				fmt.Printf("WARN %s is pinned to %s but its GPU VM runs on %s\n", namespace, host, node)
+			}
+			pinned[host] = append(pinned[host], namespace)
+		}
+		for host, tenants := range pinned {
+			if len(tenants) > 1 {
+				sort.Strings(tenants)
+				failures = append(failures, fmt.Sprintf("%s has GPU VMs from multiple pinned namespaces: %s", host, strings.Join(tenants, ", ")))
+			}
+		}
+		Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+	})
+
+	It("C-12 GPU VM check fixtures", func() {
+		vm := map[string]interface{}{
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"domain": map[string]interface{}{
+							"devices": map[string]interface{}{
+								"gpus": []interface{}{map[string]interface{}{"deviceName": "nvidia.com/GH100_H100_SXM5_80GB"}},
+							},
+						},
+					},
+				},
+			},
+		}
+		Expect(gpuDeviceNames(virtualMachineTestSpec(vm, "VirtualMachine"))).To(ConsistOf("nvidia.com/GH100_H100_SXM5_80GB"))
+
+		vmi := map[string]interface{}{
+			"spec": map[string]interface{}{
+				"domain": map[string]interface{}{
+					"devices": map[string]interface{}{
+						"hostDevices": []interface{}{map[string]interface{}{"deviceName": "nvidia.com/GH100_H100_SXM5_80GB"}},
+					},
+				},
+			},
+		}
+		Expect(gpuDeviceNames(virtualMachineTestSpec(vmi, "VirtualMachineInstance"))).To(ConsistOf("nvidia.com/GH100_H100_SXM5_80GB"))
+
+		permitted := permittedHostDevices(map[string]interface{}{
+			"virtualization": map[string]interface{}{
+				"permittedHostDevices": map[string]interface{}{
+					"pciHostDevices": []interface{}{
+						map[string]interface{}{"resourceName": "nvidia.com/GOOD", "externalResourceProvider": true},
+						map[string]interface{}{"resourceName": "nvidia.com/BAD", "externalResourceProvider": false},
+					},
+				},
+			},
+		})
+		Expect(permitted["nvidia.com/GOOD"]).To(BeTrue())
+		Expect(permitted["nvidia.com/BAD"]).To(BeFalse())
+
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2")},
+			},
+		}}}}
+		Expect(podGPUResources(pod)).To(HaveKeyWithValue("nvidia.com/gpu", "2"))
+		Expect(podGPUAllocation(pod)).To(HaveKeyWithValue("nvidia.com/gpu", int64(2)))
+
+		hasLevel := func(findings []gpuVMFinding, level string) bool {
+			for _, finding := range findings {
+				if finding.level == level {
+					return true
+				}
+			}
+			return false
+		}
+		syntheticVMI := func(namespace, node string) unstructured.Unstructured {
+			return unstructured.Unstructured{Object: map[string]interface{}{
+				"metadata": map[string]interface{}{"name": namespace + "-vm", "namespace": namespace},
+				"spec": map[string]interface{}{
+					"domain": map[string]interface{}{
+						"devices": map[string]interface{}{
+							"gpus": []interface{}{map[string]interface{}{"deviceName": "nvidia.com/GH100_H100_SXM5_80GB"}},
+						},
+					},
+				},
+				"status": map[string]interface{}{"phase": "Running", "nodeName": node},
+			}}
+		}
+		syntheticVM := func(namespace, eviction string, containerDisk bool) unstructured.Unstructured {
+			spec := map[string]interface{}{
+				"domain": map[string]interface{}{
+					"devices": map[string]interface{}{
+						"gpus": []interface{}{map[string]interface{}{"deviceName": "nvidia.com/GH100_H100_SXM5_80GB"}},
+					},
+				},
+			}
+			if eviction != "" {
+				spec["evictionStrategy"] = eviction
+			}
+			volume := map[string]interface{}{"name": "root"}
+			if containerDisk {
+				volume["containerDisk"] = map[string]interface{}{"image": "quay.io/kubevirt/cirros-container-disk-demo"}
+			}
+			spec["volumes"] = []interface{}{volume}
+			return unstructured.Unstructured{Object: map[string]interface{}{
+				"metadata": map[string]interface{}{"name": namespace + "-vm", "namespace": namespace},
+				"spec":     map[string]interface{}{"template": map[string]interface{}{"spec": spec}},
+			}}
+		}
+		syntheticPolicy := func(enabled bool, defaultWorkload string) unstructured.Unstructured {
+			return unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"sandboxWorkloads": map[string]interface{}{
+						"enabled":         enabled,
+						"defaultWorkload": defaultWorkload,
+					},
+				},
+			}}
+		}
+
+		Expect(hasLevel(evaluateGPUTenancy([]unstructured.Unstructured{
+			syntheticVMI("tenant-a", "gpu-1"),
+			syntheticVMI("tenant-b", "gpu-1"),
+		}), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUTenancy([]unstructured.Unstructured{syntheticVMI("tenant-a", "gpu-1")}), "PASS")).To(BeTrue())
+
+		Expect(hasLevel(evaluateGPUEviction([]unstructured.Unstructured{syntheticVM("tenant-a", "", false)}, "LiveMigrate"), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUEviction([]unstructured.Unstructured{syntheticVM("tenant-a", "None", false)}, "LiveMigrate"), "PASS")).To(BeTrue())
+
+		Expect(hasLevel(evaluateGPUDisk([]unstructured.Unstructured{syntheticVM("tenant-a", "None", true)}), "WARN")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUDisk([]unstructured.Unstructured{syntheticVM("tenant-a", "None", false)}), "PASS")).To(BeTrue())
+
+		Expect(hasLevel(evaluateGPUPermitted(map[string][]string{"nvidia.com/GPU": {"gpu-1"}}, map[string]bool{}, map[string]bool{"nvidia.com/GPU": true}), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUPermitted(map[string][]string{"nvidia.com/GPU": {"gpu-1"}}, map[string]bool{"nvidia.com/GPU": false}, map[string]bool{"nvidia.com/GPU": true}), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUPermitted(map[string][]string{"nvidia.com/GPU": {"gpu-1"}}, map[string]bool{"nvidia.com/GPU": true}, map[string]bool{"nvidia.com/GPU": true}), "PASS")).To(BeTrue())
+
+		Expect(hasLevel(evaluateGPUSandbox([]string{"gpu-1"}, nil), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUSandbox([]string{"gpu-1"}, []unstructured.Unstructured{syntheticPolicy(false, "container")}), "FAIL")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUSandbox([]string{"gpu-1"}, []unstructured.Unstructured{syntheticPolicy(true, "container")}), "PASS")).To(BeTrue())
+		Expect(hasLevel(evaluateGPUSandbox([]string{"gpu-1"}, []unstructured.Unstructured{syntheticPolicy(true, "vm")}), "WARN")).To(BeTrue())
 	})
 })

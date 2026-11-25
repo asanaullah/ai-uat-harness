@@ -77,6 +77,12 @@ if [ "$MODE" = control ]; then
     echo "################ control-$kind"
     check-payload scan local --path $R > /work/out.txt 2>&1; echo "exit=$?"; report
   done
+elif [ "$MODE" = tags ]; then
+  go install github.com/google/go-containerregistry/cmd/crane@latest >>/work/build.log 2>&1 || { tail -5 /work/build.log; exit 1; }
+  for repo in $IMAGES; do
+    echo "################ $repo"
+    crane ls "$repo" 2>&1 | tail -n 15
+  done
 else
   go install github.com/google/go-containerregistry/cmd/crane@latest >>/work/build.log 2>&1 || { tail -5 /work/build.log; exit 1; }
   n=0
@@ -103,8 +109,12 @@ var _ = Describe("FIPS image scan", Label("pass-fail"), func() {
 	It("scans images for FIPS-capable binaries", func() {
 		ctx := context.Background()
 		images := strings.TrimSpace(os.Getenv("FIPS_IMAGES"))
+		tags := strings.TrimSpace(os.Getenv("FIPS_TAGS"))
 		mode := "images"
-		if images == "" {
+		if images == "" && tags != "" {
+			mode = "tags"
+			images = tags
+		} else if images == "" {
 			mode = "control"
 		}
 

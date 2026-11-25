@@ -295,6 +295,7 @@ chmod 0644 /certs/*`
 			time.Sleep(2 * time.Second)
 		}
 
+		sequentialStart := time.Now()
 		sequentialFailures := 0
 		var sequentialErr error
 		for i := 0; i < 200; i++ {
@@ -303,8 +304,10 @@ chmod 0644 /certs/*`
 				sequentialErr = err
 			}
 		}
+		sequentialElapsed := time.Since(sequentialStart)
 
 		const burst = 1000
+		burstStart := time.Now()
 		burstFailures := 0
 		var burstErr error
 		var lock sync.Mutex
@@ -322,9 +325,41 @@ chmod 0644 /certs/*`
 			}()
 		}
 		wait.Wait()
+		burstElapsed := time.Since(burstStart)
 
-		fmt.Printf("TLS handshakes: sequential=%d failures=%d burst=%d failures=%d\n",
-			200, sequentialFailures, burst, burstFailures)
+		fmt.Printf("TLS handshakes: sequential=%d failures=%d in %s; burst=%d failures=%d in %s (%.0f/s)\n",
+			200, sequentialFailures, sequentialElapsed, burst, burstFailures, burstElapsed,
+			float64(burst)/burstElapsed.Seconds())
+
+		const stormConnections = 500
+		const stormCycles = 3
+		stormFailures := 0
+		var stormErr error
+		stormStart := time.Now()
+		for cycle := 0; cycle < stormCycles; cycle++ {
+			var stormLock sync.Mutex
+			var stormWait sync.WaitGroup
+			for i := 0; i < stormConnections; i++ {
+				stormWait.Add(1)
+				go func() {
+					defer stormWait.Done()
+					if err := handshake(address, config); err != nil {
+						stormLock.Lock()
+						stormFailures++
+						stormErr = err
+						stormLock.Unlock()
+					}
+				}()
+			}
+			stormWait.Wait()
+			time.Sleep(500 * time.Millisecond)
+		}
+		stormElapsed := time.Since(stormStart)
+		fmt.Printf("TLS storm: cycles=%d connections=%d failures=%d in %s\n",
+			stormCycles, stormConnections, stormFailures, stormElapsed)
+		if stormFailures > 0 {
+			fmt.Printf("storm error: %v\n", stormErr)
+		}
 		if sequentialFailures > 0 {
 			fmt.Printf("sequential error: %v\n", sequentialErr)
 		}
@@ -334,8 +369,9 @@ chmod 0644 /certs/*`
 
 		current, err := tlsClientset.CoreV1().Pods(tlsAdminNS).Get(ctx, created.Name, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(current.Status.Phase).To(Equal(corev1.PodRunning), "test etcd did not survive the handshake burst")
+		Expect(current.Status.Phase).To(Equal(corev1.PodRunning), "test etcd did not survive the handshake traffic")
 		Expect(sequentialFailures).To(Equal(0), "sequential handshake failures")
 		Expect(burstFailures).To(Equal(0), "burst handshake failures")
+		Expect(stormFailures).To(Equal(0), "storm handshake failures")
 	})
 })
