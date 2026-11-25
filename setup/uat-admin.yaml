@@ -312,7 +312,11 @@ rules:
     resources: ["kubevirts"]
     verbs: ["get"]
     resourceNames: ["kubevirt-kubevirt-hyperconverged"]
-  - apiGroups: ["logging.openshift.io"]
+  # Cluster Logging 6 moved ClusterLogForwarder from logging.openshift.io to
+  # observability.openshift.io. Both are listed so the check works against
+  # either; with only the old group the API looks absent and T-22 reports
+  # that audit logs are not forwarded on a cluster that is forwarding them.
+  - apiGroups: ["logging.openshift.io", "observability.openshift.io"]
     resources: ["clusterlogforwarders"]
     verbs: ["get", "list"]
   - apiGroups: ["loki.grafana.com"]

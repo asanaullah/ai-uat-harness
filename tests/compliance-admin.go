@@ -1460,14 +1460,31 @@ var _ = Describe("Compliance admin", Label("pass-fail"), func() {
 			return
 		}
 
-		clfGVR := schema.GroupVersionResource{Group: "logging.openshift.io", Version: "v1", Resource: "clusterlogforwarders"}
-		clfs, err := dynamicClient.Resource(clfGVR).Namespace(loggingNS).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			if isMissing(err) {
-				failures = append(failures, "no ClusterLogForwarder API: audit logs are not forwarded")
-			} else {
-				failures = append(failures, fmt.Sprintf("list ClusterLogForwarders: %v", err))
+		// Cluster Logging 6 moved ClusterLogForwarder from logging.openshift.io
+		// to observability.openshift.io, keeping spec.pipelines[].inputRefs.
+		// Try the current group first and fall back, or a cluster that is
+		// forwarding its audit logs is reported as not forwarding them.
+		clfGVRs := []schema.GroupVersionResource{
+			{Group: "observability.openshift.io", Version: "v1", Resource: "clusterlogforwarders"},
+			{Group: "logging.openshift.io", Version: "v1", Resource: "clusterlogforwarders"},
+		}
+		var clfs *unstructured.UnstructuredList
+		missing := 0
+		for _, gvr := range clfGVRs {
+			clfs, err = dynamicClient.Resource(gvr).Namespace(loggingNS).List(ctx, metav1.ListOptions{})
+			if err == nil {
+				break
 			}
+			if isMissing(err) {
+				missing++
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("list ClusterLogForwarders (%s): %v", gvr.Group, err))
+			Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
+			return
+		}
+		if missing == len(clfGVRs) {
+			failures = append(failures, "no ClusterLogForwarder API: audit logs are not forwarded")
 			Expect(failures).To(BeEmpty(), strings.Join(failures, "\n"))
 			return
 		}
