@@ -1,0 +1,18 @@
+# Assisted by Claude Opus
+# Generic hub admin run. The target is the management cluster whose hosted
+# control planes live in clusters-<hosted-cluster>. Point KUBECONFIG at the
+# hub and pass this cluster inventory file with -a -c.
+#
+# The hub checks read the hub API and discover the HostedClusters there, so
+# this file has no uat_nodes and no fixed hosted cluster name.
+all:
+  vars:
+    uat_cluster_name: uat-admin-hub
+    uat_namespace: uat-admin
+    uat_storage:
+      pvc: uat-admin-storage
+      basePath: uat/results
+    uat_runner:
+      namespace: uat-admin-runner
+      serviceAccount: uat-admin-runner-sa
+      pvc: uat-admin-runner-storage

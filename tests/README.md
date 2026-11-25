@@ -181,7 +181,7 @@ The permission checks are there to verify that the test pod is sandboxed. If any
 
 ### Purpose
 
-This test checks whether a node's actual hardware and software configuration matches what the cluster specification says it should be. It looks at things like GPU count and model, NVLink connectivity, PCIe link width, CPU and memory specs, kernel version, power management settings, and FIPS compliance. The goal is to surface hardware faults or misconfigurations early, before the more expensive GPU-heavy tests run.
+This test checks whether a node's actual hardware and software configuration matches what the cluster specification says it should be. It looks at things like GPU count and model, NVLink connectivity, PCIe link width, CPU and memory specs, kernel version, power management settings. The goal is to surface hardware faults or misconfigurations early, before the more expensive GPU-heavy tests run.
 
 ### Architecture
 
@@ -228,10 +228,6 @@ The assertions are grouped into three categories:
 18. CPU idle governor (e.g. `menu`)
 19. Only the expected C-states are enabled (e.g. POLL and C1 only)
 20. Transparent hugepages setting (e.g. `madvise`)
-
-**Compliance checks** cover regulatory requirements:
-
-21. FIPS mode is enabled (this check is skipped if the cluster spec does not require it)
 
 ### Prerequisites
 

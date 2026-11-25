@@ -1,0 +1,6 @@
+# Assisted by Claude Opus
+- name: compliance-hub
+  ansible.builtin.import_playbook: ../compliance-hub.yml
+
+- name: Finish
+  ansible.builtin.import_playbook: ../../plugins/playbooks/finish.yml

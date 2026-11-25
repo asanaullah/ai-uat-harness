@@ -73,10 +73,10 @@
           - name: src
             emptyDir: {}
 
-# An admin run stages the tree from deploy.sh with oc, because the Python
-# client drops impersonation on exec WebSockets.
+# The caller has pods/exec in the runner namespace, so k8s_cp works for both
+# regular and admin runs.
 - name: Hand the local files to the runner pod
-  when: _uat_local_source | bool and not (uat_runner_skip_copy | default(false) | bool)
+  when: _uat_local_source | bool
   block:
     - name: Make a staging file
       ansible.builtin.tempfile:
@@ -122,8 +122,8 @@
   ansible.builtin.debug:
     msg:
       - "Runner pod {{ uat_runner.namespace }}/{{ _uat_runner_pod }} started for run {{ uat_run_id }}."
-      - "Follow it with: oc {{ '--as system:admin ' if uat_admin_run | default(false) | bool else '' }}logs -f {{ _uat_runner_pod }} -n {{ uat_runner.namespace }}"
-      - "Copy it back later with: ./deploy.sh {{ '-a' if uat_admin_run | default(false) | bool else '-c <cluster>' }} -F {{ uat_run_id }}"
+      - "Follow it with: oc logs -f {{ _uat_runner_pod }} -n {{ uat_runner.namespace }}"
+      - "Copy it back later with: ./deploy.sh {{ '-a -c <admin cluster file>' if uat_admin_run | default(false) | bool else '-c <cluster>' }} -F {{ uat_run_id }}"
 
 - name: Wait for the runner and copy the run back
   when: not (uat_runner_detach | default(false) | bool)

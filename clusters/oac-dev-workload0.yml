@@ -2,8 +2,6 @@
 all:
   vars:
     uat_cluster_name: oac-dev-workload0
-    uat_compliance:
-      fipsEnabled: false
 
     uat_namespace: uat-project
     uat_storage:

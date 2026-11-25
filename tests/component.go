@@ -25,12 +25,7 @@ type ClusterConfig struct {
 }
 
 type ClusterConfigSpec struct {
-	Compliance ComplianceSpec `yaml:"compliance"`
-	Nodes      []NodeSpec     `yaml:"nodes"`
-}
-
-type ComplianceSpec struct {
-	FipsEnabled bool `yaml:"fipsEnabled"`
+	Nodes []NodeSpec `yaml:"nodes"`
 }
 
 type ResourceNames struct {
@@ -76,7 +71,6 @@ type NodeSpec struct {
 var (
 	sanity              SanitySpec
 	ideal               IdealSpec
-	compliance          ComplianceSpec
 	componentResultsDir string
 )
 
@@ -106,8 +100,6 @@ var _ = BeforeSuite(func() {
 		}
 	}
 	Expect(found).To(BeTrue(), "Node %s not found in cluster config", nodeName)
-
-	compliance = cluster.Spec.Compliance
 
 	GinkgoWriter.Printf("Node: %s\n", nodeName)
 	GinkgoWriter.Printf("Expected GPU: %dx %s\n", sanity.GpuCount, sanity.ResourceNames.GpuModel)
@@ -500,28 +492,6 @@ var _ = Describe("Ideal Configuration", Label("pass-fail"), func() {
 				"background compaction (khugepaged). 'madvise' lets applications "+
 				"opt in explicitly; 'never' disables THP entirely.",
 			actual, ideal.TransparentHugepages)
-	})
-})
-
-// ---------------------------------------------------------------------------
-// Compliance checks
-// ---------------------------------------------------------------------------
-
-var _ = Describe("Compliance Checks", Label("pass-fail"), func() {
-
-	It("should have FIPS mode enabled", func() {
-		if !compliance.FipsEnabled {
-			Skip("FIPS mode not required by cluster config")
-		}
-
-		actual := readSysfs("/proc/sys/crypto/fips_enabled")
-		GinkgoWriter.Printf("FIPS mode: %s (expected: 1)\n", actual)
-		Expect(actual).To(Equal("1"),
-			"FIPS mode is not enabled on this node (/proc/sys/crypto/fips_enabled = '%s'). "+
-				"NIST 800-171 requires FIPS-validated cryptographic modules (requirement 3.13.11). "+
-				"FIPS mode must be enabled at OpenShift install time via the install-config.yaml "+
-				"'fips: true' setting — it cannot be turned on after installation without a "+
-				"full cluster reinstall.", actual)
 	})
 })
 

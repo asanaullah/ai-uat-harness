@@ -1,0 +1,47 @@
+# Assisted by Claude Opus
+- name: Plan tls-traffic
+  ansible.builtin.import_playbook: ../plugins/playbooks/sequences.yml
+  vars:
+    uat_test: tls-traffic
+    uat_modes: [project]
+
+- name: tls-traffic
+  hosts: "{{ hostvars.localhost.uat_hosts | default('uat_none') }}"
+  serial: "{{ hostvars.localhost.uat_serial | default(0) }}"
+  gather_facts: false
+  vars:
+    serverConfig:
+      namespace: uat-admin
+      serviceAccount: uat-admin-sa
+  tasks:
+    - name: Start the sequence
+      ansible.builtin.import_role:
+        name: uat_sequence
+
+    - name: Steps
+      block:
+        - name: checker
+          ansible.builtin.include_role:
+            name: uat_pod
+          vars:
+            step:
+              name: checker
+              serviceAccountName: uat-admin-sa
+              image: registry.access.redhat.com/ubi9/ubi:9.8
+              timeout: 900
+              labelFilter: pass-fail
+              env:
+                - name: UAT_ADMIN_NAMESPACE
+                  value: "{{ serverConfig.namespace }}"
+                - name: NODE_PROBE_SERVICE_ACCOUNT
+                  value: "{{ serverConfig.serviceAccount }}"
+      rescue:
+        - name: Handle the failure
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: failed
+      always:
+        - name: Tear down
+          ansible.builtin.import_role:
+            name: uat_sequence
+            tasks_from: teardown

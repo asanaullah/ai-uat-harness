@@ -1,6 +1,7 @@
 # Assisted by Claude Opus
 # The admin run does not need a node inventory. The compliance test lists
-# nodes itself. This file only names the namespace, the claim and the runner.
+# nodes itself. The test pods run in uat-admin; the runner pod runs in
+# uat-admin-runner.
 all:
   vars:
     uat_cluster_name: uat-admin
@@ -9,6 +10,18 @@ all:
       pvc: uat-admin-storage
       basePath: uat/results
     uat_runner:
-      namespace: uat-admin
-      serviceAccount: uat-admin-sa
-      pvc: uat-admin-storage
+      namespace: uat-admin-runner
+      serviceAccount: uat-admin-runner-sa
+      pvc: uat-admin-runner-storage
+    uat_compliance:
+      allowedSCCPatterns:
+        - '^nvidia-'
+        - '^kubevirt-controller$'
+        - '^openshift-ai-'
+        - '^rossoctl-'
+      operatorFipsAccepted:
+        cluster-observability-operator: "images pass check-payload; CSV flag wrong"
+        portworx-operator: "vendor gap: Pure's tentative FIPS PX-CSI is 1H2027"
+        gpu-operator-certified: "under review: ask NVIDIA"
+        patch-operator: "under review; Patches can become ACM ConfigurationPolicies"
+        group-sync-operator: "not needed on compliant hubs; runs only on oac-dev-infra"

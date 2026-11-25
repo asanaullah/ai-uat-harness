@@ -1,0 +1,407 @@
+# Assisted by Claude Opus
+# Manual setup for the compliance admin run. This mirrors the uat-harness
+# chart's uat-admin and uat-admin-runner resources so the namespaces can be
+# prepared on a hub or a cluster without installing the chart. The runner pod
+# runs in uat-admin-runner; the tests run in uat-admin.
+#
+# Apply with:
+#   oc apply -f setup/uat-admin.yaml
+#
+# Change storageClassName to the cluster's ReadWriteMany StorageClass.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uat-admin
+  labels:
+    massopen.cloud/project: "uat-admin"
+spec: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-and-internet
+  namespace: uat-admin
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uat-admin-storage
+  namespace: uat-admin
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: pure-fb-nfsv4
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uat-admin-sa
+  namespace: uat-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: uat-admin-role
+  namespace: uat-admin
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: uat-admin-sa-binding
+  namespace: uat-admin
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-sa
+    namespace: uat-admin
+roleRef:
+  kind: Role
+  name: uat-admin-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# The admin runner account creates the test pod in uat-admin.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: uat-admin-runner-sa-admin-binding
+  namespace: uat-admin
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-runner-sa
+    namespace: uat-admin-runner
+roleRef:
+  kind: Role
+  name: uat-admin-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uat-admin-runner
+  labels:
+    massopen.cloud/project: "uat-admin-runner"
+spec: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-and-internet
+  namespace: uat-admin-runner
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uat-admin-runner-storage
+  namespace: uat-admin-runner
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: pure-fb-nfsv4
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uat-admin-runner-sa
+  namespace: uat-admin-runner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: uat-admin-runner-role
+  namespace: uat-admin-runner
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: uat-admin-runner-sa-self-binding
+  namespace: uat-admin-runner
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-runner-sa
+    namespace: uat-admin-runner
+roleRef:
+  kind: Role
+  name: uat-admin-runner-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: uat-admin-runner-user-role
+  namespace: uat-admin-runner
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: uat-admin-runner-user-binding
+  namespace: uat-admin-runner
+subjects:
+  - kind: Group
+    name: project-uat
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: uat-admin-runner-user-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: uat-admin-scc-privileged
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-sa
+    namespace: uat-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: uat-admin-read
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["get"]
+    resourceNames: ["gpu-modality-switcher"]
+  - apiGroups: ["machineconfiguration.openshift.io"]
+    resources: ["machineconfigs", "machineconfigpools"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+    resourceNames: ["hostedclusters.hypershift.openshift.io", "virtualmachines.kubevirt.io"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies"]
+    verbs: ["get"]
+    resourceNames: ["gpu-modality-switch-guard", "nvidia-runtimeclass-operator-only"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicybindings"]
+    verbs: ["get"]
+    resourceNames: ["gpu-modality-switch-guard", "nvidia-runtimeclass-operator-only", "compliant-hosted-clusters", "flashblade-nfs-tls"]
+  - apiGroups: ["config.openshift.io"]
+    resources: ["images", "oauths", "apiservers", "infrastructures", "authentications"]
+    verbs: ["get"]
+    resourceNames: ["cluster"]
+  - apiGroups: ["config.openshift.io"]
+    resources: ["clusterversions"]
+    verbs: ["get"]
+    resourceNames: ["version"]
+  - apiGroups: ["hypershift.openshift.io"]
+    resources: ["hostedclusters", "nodepools"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["openshift-apiserver"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["clusterpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["nfd.openshift.io"]
+    resources: ["nodefeatures"]
+    verbs: ["get", "list"]
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["storageprofiles"]
+    verbs: ["get", "list"]
+  - apiGroups: ["compliance.openshift.io"]
+    resources: ["compliancesuites", "compliancescans", "compliancecheckresults", "scansettings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["platform.stackrox.io"]
+    resources: ["centrals"]
+    verbs: ["get"]
+    resourceNames: ["stackrox-central-services"]
+  - apiGroups: ["platform.stackrox.io"]
+    resources: ["securedclusters"]
+    verbs: ["get"]
+    resourceNames: ["stackrox-secured-cluster-services"]
+  - apiGroups: ["hco.kubevirt.io"]
+    resources: ["hyperconvergeds"]
+    verbs: ["get"]
+    resourceNames: ["kubevirt-hyperconverged"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["kubevirts"]
+    verbs: ["get"]
+    resourceNames: ["kubevirt-kubevirt-hyperconverged"]
+  - apiGroups: ["logging.openshift.io"]
+    resources: ["clusterlogforwarders"]
+    verbs: ["get", "list"]
+  - apiGroups: ["loki.grafana.com"]
+    resources: ["lokistacks"]
+    verbs: ["get", "list"]
+  - apiGroups: ["fileintegrity.openshift.io"]
+    resources: ["fileintegrities"]
+    verbs: ["get"]
+    resourceNames: ["all-nodes"]
+  - apiGroups: ["fileintegrity.openshift.io"]
+    resources: ["fileintegritynodestatuses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules"]
+    verbs: ["get"]
+    resourceNames: ["file-integrity"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get"]
+    resourceNames: ["console", "oauth-openshift"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: uat-admin-read-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: uat-admin-read
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-sa
+    namespace: uat-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: uat-admin-inventory-read
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances"]
+    verbs: ["get", "list"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["clusterserviceversions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: uat-admin-inventory-read-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: uat-admin-inventory-read
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-sa
+    namespace: uat-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: uat-admin-read
+  namespace: openshift-apiserver
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["config"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: uat-admin-read-binding
+  namespace: openshift-apiserver
+subjects:
+  - kind: ServiceAccount
+    name: uat-admin-sa
+    namespace: uat-admin
+roleRef:
+  kind: Role
+  name: uat-admin-read
+  apiGroup: rbac.authorization.k8s.io

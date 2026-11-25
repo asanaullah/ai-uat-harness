@@ -4,7 +4,6 @@ kind: ClusterTest
 metadata:
   name: {{ uat_cluster_name | default('cluster') | to_json }}
 spec:
-  compliance: {{ uat_compliance | default({'fipsEnabled': false}) | to_json }}
   namespace: {{ uat_namespace | to_json }}
   nodes:
 {% for n in groups['uat_nodes'] | default([]) %}

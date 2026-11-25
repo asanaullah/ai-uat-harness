@@ -98,7 +98,6 @@ Each file in `clusters/` is an Ansible inventory. The nodes under `uat_nodes` ar
 all:
   vars:
     uat_cluster_name: oac-dev-workload0
-    uat_compliance: {fipsEnabled: false}
     uat_namespace: uat-project
     uat_storage: {pvc: uat-project-storage, basePath: uat/results, models: {pvc: uat-models}}
     uat_peer_namespace: uat-peer

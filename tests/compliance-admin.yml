@@ -14,6 +14,16 @@
       namespace: uat-admin
       nodeProbeImage: registry.access.redhat.com/ubi9/ubi:9.8
       serviceAccount: uat-admin-sa
+      allowedSCCPatterns: "{{ (uat_compliance | default({})).allowedSCCPatterns | default([]) }}"
+      scanBaseline: "{{ (uat_compliance | default({})).scanBaseline | default({}) }}"
+      cliImage: "{{ (uat_compliance | default({})).cliImage | default('') }}"
+      gpuClaimAllowNS: "{{ (uat_compliance | default({})).gpuClaimAllowNS | default('') }}"
+      operatorFipsAccepted: "{{ (uat_compliance | default({})).operatorFipsAccepted | default({}) }}"
+      deviceResource: "{{ (uat_compliance | default({})).deviceResource | default('') }}"
+      fipsRhcos: "{{ (uat_compliance | default({})).fipsRhcos | default('') }}"
+      fipsProviderVersion: "{{ (uat_compliance | default({})).fipsProviderVersion | default('') }}"
+      networkPolicyExemptNS: "{{ (uat_compliance | default({})).networkPolicyExemptNS | default('^(default|kube-.*|openshift-.*)$') }}"
+      memclearRecord: "{{ (uat_compliance | default({})).memclearRecord | default({}) }}"
   tasks:
     - name: Start the sequence
       ansible.builtin.import_role:
@@ -38,6 +48,28 @@
                   value: "{{ serverConfig.nodeProbeImage }}"
                 - name: NODE_PROBE_SERVICE_ACCOUNT
                   value: "{{ serverConfig.serviceAccount }}"
+                - name: ALLOWED_SCC_PATTERNS
+                  value: "{{ serverConfig.allowedSCCPatterns | to_json }}"
+                - name: SCAN_BASELINE
+                  value: "{{ serverConfig.scanBaseline | to_json }}"
+                - name: UAT_CLI_IMAGE
+                  value: "{{ serverConfig.cliImage }}"
+                - name: GPU_CLAIM_ALLOW_NS
+                  value: "{{ serverConfig.gpuClaimAllowNS }}"
+                - name: OPERATOR_FIPS_ACCEPTED
+                  value: "{{ serverConfig.operatorFipsAccepted | to_json }}"
+                - name: GODEBUG
+                  value: "tlsrsakex=1"
+                - name: DEVICE_RESOURCE
+                  value: "{{ serverConfig.deviceResource }}"
+                - name: FIPS_RHCOS
+                  value: "{{ serverConfig.fipsRhcos }}"
+                - name: FIPS_PROVIDER_VERSION
+                  value: "{{ serverConfig.fipsProviderVersion }}"
+                - name: NETWORK_POLICY_EXEMPT_NS
+                  value: "{{ serverConfig.networkPolicyExemptNS }}"
+                - name: MEMCLEAR_RECORD
+                  value: "{{ serverConfig.memclearRecord | to_json }}"
       rescue:
         - name: Handle the failure
           ansible.builtin.import_role:

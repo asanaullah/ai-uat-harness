@@ -2,5 +2,11 @@
 - name: compliance-admin
   ansible.builtin.import_playbook: ../compliance-admin.yml
 
+- name: tls-traffic
+  ansible.builtin.import_playbook: ../tls-traffic.yml
+
+- name: fips-image
+  ansible.builtin.import_playbook: ../fips-image.yml
+
 - name: Finish
   ansible.builtin.import_playbook: ../../plugins/playbooks/finish.yml
