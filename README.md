@@ -111,7 +111,7 @@ all:
           componentValidation: {sanity: {...}, ideal: {...}}
 ```
 
-The peer and runner settings are optional. A cluster that oac-apps does not manage also needs `uat_setup` for `setup/namespaces.yml`: the storage class, and the groups and users who get access (see `clusters/ocp-test.yml`). On an oac-apps cluster the `uat-harness` chart sets these, so its file has no `uat_setup`. The tool settings in `plugins/roles/uat_config/defaults/main.yml` (images, timeouts, labels) can be overridden in a cluster file, for example `uat_builder_image` for a mirrored registry.
+The peer and runner settings are optional. A cluster that oac-apps does not manage also needs `uat_setup` for `setup/namespaces.yml`: the storage class, and the groups and users who get access (see `clusters/ocp-test.yml`). On an oac-apps cluster the `uat-harness` chart sets these, so its file has no `uat_setup`. The tool settings in `plugins/roles/uat_config/defaults/main.yml` (images, timeouts, labels) can be overridden in a cluster file, for example `uat_builder_image` for a mirrored registry. Mind the Go version when you do: the compliance tests depend on `k8s.io/client-go` v0.37.2, which needs **Go 1.26 or newer**. The default `golang:1.26` satisfies that, but an older substitute does not, and the failure is an opaque `toolchain upgrade needed ... requires go >= 1.26.0` during the build rather than anything about the cluster. On a cluster whose registry allowlist excludes Docker Hub, `registry.access.redhat.com/ubi9/go-toolset:1.26` works.
 
 ## Writing a test
 
